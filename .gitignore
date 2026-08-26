@@ -1,0 +1,54 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+*.venv/
+
+# Environment Variables & Secrets
+.env
+.env.*
+*.pem
+*.key
+
+# IDE & OS Artifacts
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Video Data Files (keep directory tracked via .gitkeep)
+data/videos/*
+!data/videos/.gitkeep
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Deep Learning Models & Checkpoints (keep directory tracked via .gitkeep)
+models/*
+!models/.gitkeep
+*.pt
+*.pth
+*.onnx
+*.engine
+*.bin
+*.safetensors
+
+# Logs & Temporary Files
+*.log
+tmp/
+temp/
