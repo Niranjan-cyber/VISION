@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vision_backend
+    ports:
+      - "8000:8000"
+    environment:
+      - POSTGRES_URL=postgresql://vision_user:vision_pass@postgres:5432/vision_db
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./backend/app:/app/app
+      - ./configs:/app/configs
+      - ./models:/app/models
+      - ./data:/app/data
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: vision_frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: vision_postgres
+    environment:
+      POSTGRES_USER: vision_user
+      POSTGRES_PASSWORD: vision_pass
+      POSTGRES_DB: vision_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: vision_redis
+    ports:
+      - "6379:6379"
+
+volumes:
+  postgres_data:

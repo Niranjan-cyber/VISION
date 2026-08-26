@@ -1,0 +1,14 @@
+cameras:
+  - id: "cam_border_01"
+    name: "North Outpost RTSP Feed"
+    rtsp_url: "rtsp://admin:pass@192.168.1.101:554/stream1"
+    zone_id: "zone_north_fence"
+    fps: 30
+    enabled: true
+
+  - id: "cam_border_02"
+    name: "East Gate Thermal Stream"
+    rtsp_url: "rtsp://admin:pass@192.168.1.102:554/stream1"
+    zone_id: "zone_east_gate"
+    fps: 25
+    enabled: true
