@@ -13,7 +13,7 @@
 
 ---
 
-## 🚀 Milestone Progress Breakdown
+## 🚀 Pipeline Architecture
 
 ```text
 VIDEO STREAM
@@ -62,6 +62,63 @@ Vehicle Tracks                    Person Tracks (class_name == "person")
 
 ---
 
+## 📊 Live Verification Benchmark Results
+
+### Benchmark 1: High-Resolution Surveillance Footage (`data/videos/sample1.mp4`)
+
+Full HD 1080p footage processing test:
+
+```text
+==================================================
+       VISION — Vertical Slice 4 Pipeline        
+==================================================
+ Video Path          : data/videos/sample1.mp4
+ YOLO Model          : yolo11n.pt
+ Confidence Threshold: 0.25
+ Face Confidence     : 0.50
+ Inference Interval  : Every 1 frame(s)
+==================================================
+[INFO] Video loaded successfully. Resolution: 1920x1080, FPS: 25.00, Total Frames: 611
+[INFO] Reached end of video stream.
+==================================================
+VISION — Slice 4 Summary
+==================================================
+Frames Processed       : 611
+YOLO Inferences        : 611
+Total Detections       : 2443
+Unique Tracks          : 40
+Max Active Tracks      : 7
+Faces Detected         : 671
+Faces Associated       : 671
+Embeddings Generated   : 671
+Embedding Dimension    : 512
+Average Inference FPS  : 2.86
+==================================================
+```
+
+### Benchmark 2: Standard Footage (`data/videos/sample.mp4`)
+
+```text
+==================================================
+VISION — Slice 4 Summary
+==================================================
+Frames Processed       : 911
+YOLO Inferences        : 911
+Total Detections       : 633
+Unique Tracks          : 37
+Max Active Tracks      : 3
+Faces Detected         : 12
+Faces Associated       : 12
+Embeddings Generated   : 12
+Embedding Dimension    : 512
+Average Inference FPS  : 23.97
+==================================================
+```
+
+---
+
+## 🚀 Milestone Progress Breakdown
+
 ### 1. Vertical Slice 1: Video Ingestion & Object Detection
 - **`src/ingestion/video.py`**: Created reusable `VideoSource` class wrapping OpenCV `cv2.VideoCapture`. Exposes FPS, dimensions, frame count, and sequential frame extraction with zero YOLO coupling.
 - **`src/detection/detector.py`**: Created `YOLODetector` class wrapping `yolo11n.pt`. Filters COCO target surveillance classes (`person`, `bicycle`, `car`, `motorcycle`, `bus`, `truck`).
@@ -90,31 +147,15 @@ Vehicle Tracks                    Person Tracks (class_name == "person")
 
 ---
 
-## 📊 Benchmark & Verification Results
+## 🧪 Automated Unit Test Suite
 
-Executed against test video footage ([sample.mp4](file:///c:/Career/Hackathons/SIH/VISION/data/videos/sample.mp4)):
+Run the full automated test suite:
 
-```text
-==================================================
-       VISION — Slice 4 Summary
-==================================================
-Frames Processed       : 911
-YOLO Inferences        : 911
-Total Detections       : 633
-Unique Tracks          : 37
-Max Active Tracks      : 3
-Faces Detected         : 12
-Faces Associated       : 12
-Embeddings Generated   : 12
-Embedding Dimension    : 512
-Average Inference FPS  : ~23.97 FPS
-==================================================
-```
-
-### Unit Test Suite Output:
 ```powershell
 python -m unittest discover -s tests
 ```
+
+Output:
 ```text
 ..................
 ----------------------------------------------------------------------
@@ -138,7 +179,8 @@ VISION/
 ├── data/
 │   └── videos/
 │       ├── .gitkeep
-│       └── sample.mp4          # Test footage
+│       ├── sample.mp4          # 720p Test footage
+│       └── sample1.mp4         # 1080p Full HD Test footage
 │
 ├── models/
 │   ├── .gitkeep
@@ -206,6 +248,10 @@ python -m unittest discover -s tests
 
 ### 3. Launch VISION Pipeline
 ```powershell
+# Run on sample1.mp4 (Full HD 1080p)
+python -m src.main --video data/videos/sample1.mp4
+
+# Run on sample.mp4 (720p)
 python -m src.main --video data/videos/sample.mp4
 ```
 
