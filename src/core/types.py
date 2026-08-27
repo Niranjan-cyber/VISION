@@ -55,3 +55,11 @@ class Track:
     confidence: float
     bbox: BoundingBox
     frame_number: int
+
+
+@dataclass
+class FaceDetection:
+    """Represents a detected face location and confidence in VISION."""
+
+    bbox: BoundingBox
+    confidence: float
