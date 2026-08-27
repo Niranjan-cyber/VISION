@@ -1,3 +1,3 @@
-from src.core.types import BoundingBox, Detection
+from src.core.types import BoundingBox, Detection, Track
 
-__all__ = ["BoundingBox", "Detection"]
+__all__ = ["BoundingBox", "Detection", "Track"]

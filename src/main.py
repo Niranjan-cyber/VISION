@@ -2,13 +2,14 @@ import argparse
 import os
 import sys
 import time
-from typing import Dict, List, Tuple
+from typing import Dict, List, Set, Tuple
 import cv2
 import numpy as np
 
-from src.core.types import Detection
+from src.core.types import Detection, Track
 from src.detection.detector import YOLODetector
 from src.ingestion.video import VideoSource
+from src.tracking.tracker import ByteTrackTracker
 
 # Color palette for object visualization (BGR format)
 CLASS_COLORS: Dict[str, Tuple[int, int, int]] = {
@@ -24,14 +25,14 @@ DEFAULT_COLOR = (200, 200, 200)
 
 def draw_annotations(
     frame: np.ndarray,
-    detections: List[Detection],
+    tracks: List[Track],
 ) -> np.ndarray:
-    """Draws bounding boxes and labels on frame using OpenCV."""
+    """Draws bounding boxes and tracked labels ([class_name] #[track_id] [confidence]) on frame."""
     annotated = frame.copy()
 
-    for det in detections:
-        color = CLASS_COLORS.get(det.class_name, DEFAULT_COLOR)
-        bbox = det.bbox
+    for trk in tracks:
+        color = CLASS_COLORS.get(trk.class_name, DEFAULT_COLOR)
+        bbox = trk.bbox
 
         # Draw bounding box
         cv2.rectangle(
@@ -42,8 +43,8 @@ def draw_annotations(
             thickness=2,
         )
 
-        # Label text: e.g. "person 0.91"
-        label = f"{det.class_name} {det.confidence:.2f}"
+        # Label text format: e.g. "car #1 0.91"
+        label = f"{trk.class_name} #{trk.track_id} {trk.confidence:.2f}"
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 0.5
         thickness = 1
@@ -87,6 +88,7 @@ def draw_hud(
     total_frames: int,
     source_fps: float,
     inference_fps: float,
+    active_tracks_count: int,
     detection_count: int,
 ) -> np.ndarray:
     """Draws runtime status HUD on top-left of frame."""
@@ -94,7 +96,7 @@ def draw_hud(
     overlay = hud_frame.copy()
 
     panel_x1, panel_y1 = 15, 15
-    panel_x2, panel_y2 = 270, 135
+    panel_x2, panel_y2 = 270, 155
 
     # Glassmorphic dark panel background
     cv2.rectangle(
@@ -115,7 +117,7 @@ def draw_hud(
     )
 
     lines = [
-        ("VISION - Slice 1", (0, 215, 255), 0.55, 2),
+        ("VISION - Slice 2 (ByteTrack)", (0, 215, 255), 0.50, 2),
         (
             f"Frame: {current_frame} / {total_frames if total_frames > 0 else 'N/A'}",
             (220, 220, 220),
@@ -129,6 +131,7 @@ def draw_hud(
             0.45,
             1,
         ),
+        (f"Active Tracks: {active_tracks_count}", (0, 215, 255), 0.45, 1),
         (f"Detections: {detection_count}", (255, 255, 255), 0.45, 1),
     ]
 
@@ -151,7 +154,7 @@ def draw_hud(
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="VISION Vertical Slice 1 - Real-Time Video Object Detection"
+        description="VISION Vertical Slice 2 - Multi-Object Tracking with ByteTrack"
     )
     parser.add_argument(
         "--video",
@@ -184,7 +187,7 @@ def main():
     args = parse_args()
 
     print("==================================================")
-    print("       VISION — Vertical Slice 1 Pipeline        ")
+    print("       VISION — Vertical Slice 2 Pipeline        ")
     print("==================================================")
     print(f" Video Path          : {args.video}")
     print(f" Model               : {args.model}")
@@ -221,18 +224,31 @@ def main():
         source.release()
         sys.exit(1)
 
-    window_name = "VISION - Vertical Slice 1"
+    # 3. Tracker Initialization
+    try:
+        tracker = ByteTrackTracker(
+            track_thresh=args.confidence,
+            match_thresh=0.8,
+            track_buffer=30,
+        )
+    except Exception as e:
+        print(f"[ERROR] Tracker initialization failed: {e}", file=sys.stderr)
+        source.release()
+        sys.exit(1)
+
+    window_name = "VISION - Vertical Slice 2 (ByteTrack)"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
     latest_detections: List[Detection] = []
+    latest_tracks: List[Track] = []
     frame_index = 0
     inference_count = 0
     total_inference_time = 0.0
     recent_inference_fps = 0.0
     total_detections = 0
 
-    target_class_order = ["person", "bicycle", "car", "motorcycle", "bus", "truck"]
-    class_counts: Dict[str, int] = {cls_name: 0 for cls_name in target_class_order}
+    observed_unique_track_ids: Set[int] = set()
+    max_active_tracks = 0
 
     start_time = time.time()
 
@@ -247,10 +263,11 @@ def main():
 
             frame_index = source.current_frame
 
-            # Frame Sampling: Run YOLO inference every Nth frame
+            # Frame Sampling: Run YOLO & ByteTrack every Nth frame
             if (frame_index - 1) % args.interval == 0:
                 t0 = time.time()
                 latest_detections = detector.detect(frame)
+                latest_tracks = tracker.update(latest_detections, frame_index)
                 t1 = time.time()
 
                 inf_time = t1 - t0
@@ -260,19 +277,19 @@ def main():
                     recent_inference_fps = 1.0 / inf_time
 
                 total_detections += len(latest_detections)
-                for det in latest_detections:
-                    if det.class_name in class_counts:
-                        class_counts[det.class_name] += 1
-                    else:
-                        class_counts[det.class_name] = 1
+                for trk in latest_tracks:
+                    observed_unique_track_ids.add(trk.track_id)
+
+                if len(latest_tracks) > max_active_tracks:
+                    max_active_tracks = len(latest_tracks)
 
             elapsed_total = time.time() - start_time
             actual_source_fps = (
                 frame_index / elapsed_total if elapsed_total > 0 else source.fps
             )
 
-            # Annotate frame
-            annotated_frame = draw_annotations(frame, latest_detections)
+            # Annotate frame with tracks
+            annotated_frame = draw_annotations(frame, latest_tracks)
 
             # Draw HUD
             final_frame = draw_hud(
@@ -281,6 +298,7 @@ def main():
                 total_frames=source.frame_count,
                 source_fps=actual_source_fps,
                 inference_fps=recent_inference_fps,
+                active_tracks_count=len(latest_tracks),
                 detection_count=len(latest_detections),
             )
 
@@ -306,18 +324,14 @@ def main():
         else 0.0
     )
     print("==================================================")
-    print("VISION — Detection Summary")
+    print("VISION — Tracking Summary")
     print("==================================================")
-    print(f"Frames Processed : {frame_index}")
-    print(f"YOLO Inferences  : {inference_count}")
-    print(f"Total Detections : {total_detections}")
-    print("")
-    print("Detection Classes:")
-    for cls_name in target_class_order:
-        count = class_counts.get(cls_name, 0)
-        print(f"  {cls_name:<10} : {count}")
-    print("")
-    print(f"Average Inference FPS : {avg_inf_fps:.2f}")
+    print(f"Frames Processed       : {frame_index}")
+    print(f"YOLO Inferences        : {inference_count}")
+    print(f"Total Detections       : {total_detections}")
+    print(f"Unique Tracks          : {len(observed_unique_track_ids)}")
+    print(f"Max Active Tracks      : {max_active_tracks}")
+    print(f"Average Inference FPS  : {avg_inf_fps:.2f}")
     print("==================================================")
 
 

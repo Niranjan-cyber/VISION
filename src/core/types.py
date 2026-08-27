@@ -43,3 +43,15 @@ class Detection:
     class_name: str
     confidence: float
     bbox: BoundingBox
+
+
+@dataclass
+class Track:
+    """Represents an active object track across frames in VISION."""
+
+    track_id: int
+    class_id: int
+    class_name: str
+    confidence: float
+    bbox: BoundingBox
+    frame_number: int
