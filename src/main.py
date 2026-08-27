@@ -6,10 +6,11 @@ from typing import Dict, List, Set, Tuple
 import cv2
 import numpy as np
 
-from src.core.types import BoundingBox, Detection, FaceDetection, Track
+from src.core.types import BoundingBox, Detection, FaceDetection, FaceEmbedding, Track
 from src.detection.detector import YOLODetector
 from src.face.association import FaceTrackAssociation, associate_faces_to_tracks
 from src.face.detector import FaceDetector
+from src.face.embedder import FaceEmbedder
 from src.ingestion.video import VideoSource
 from src.tracking.tracker import ByteTrackTracker
 
@@ -31,8 +32,9 @@ def draw_annotations(
     tracks: List[Track],
     faces: List[FaceDetection],
     associations: List[FaceTrackAssociation],
+    embeddings_map: Dict[int, FaceEmbedding],
 ) -> np.ndarray:
-    """Renders tracked object bounding boxes, face boxes, and face-to-track association labels."""
+    """Renders tracked object bounding boxes, face boxes, and embedding status indicators."""
     annotated = frame.copy()
     h, w = annotated.shape[:2]
 
@@ -46,7 +48,6 @@ def draw_annotations(
         color = CLASS_COLORS.get(trk.class_name, DEFAULT_COLOR)
         bbox = trk.bbox
 
-        # Safe clamp bounding box
         x1 = max(0, min(bbox.x1, w - 1))
         y1 = max(0, min(bbox.y1, h - 1))
         x2 = max(0, min(bbox.x2, w - 1))
@@ -57,7 +58,6 @@ def draw_annotations(
 
         cv2.rectangle(annotated, (x1, y1), (x2, y2), color, thickness=2)
 
-        # Object label: e.g. "person #17 0.94" or "car #7 0.91"
         label = f"{trk.class_name} #{trk.track_id} {trk.confidence:.2f}"
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 0.5
@@ -81,7 +81,7 @@ def draw_annotations(
             lineType=cv2.LINE_AA,
         )
 
-    # 2. Render Face Boxes & Associations
+    # 2. Render Face Boxes & Embedding Indicators
     for face in faces:
         bbox = face.bbox
         fx1 = max(0, min(bbox.x1, w - 1))
@@ -94,15 +94,19 @@ def draw_annotations(
 
         cv2.rectangle(annotated, (fx1, fy1), (fx2, fy2), FACE_COLOR, thickness=2)
 
-        # Check if face is associated with a person track
         assoc_track_id = associated_map.get(id(face))
+        has_embedding = id(face) in embeddings_map
+
         if assoc_track_id is not None:
-            face_label = f"face -> #{assoc_track_id}"
+            if has_embedding:
+                face_label = f"face -> #{assoc_track_id} | emb [check]"
+            else:
+                face_label = f"face -> #{assoc_track_id}"
         else:
             face_label = f"face {face.confidence:.2f}"
 
         font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.45
+        font_scale = 0.42
         thickness = 1
 
         (text_w, text_h), baseline = cv2.getTextSize(face_label, font, font_scale, thickness)
@@ -136,13 +140,14 @@ def draw_hud(
     detection_count: int,
     faces_detected_count: int,
     faces_associated_count: int,
+    embeddings_generated_count: int,
 ) -> np.ndarray:
     """Draws runtime status HUD on top-left of frame."""
     hud_frame = frame.copy()
     overlay = hud_frame.copy()
 
     panel_x1, panel_y1 = 15, 15
-    panel_x2, panel_y2 = 280, 195
+    panel_x2, panel_y2 = 285, 235
 
     # Glassmorphic dark panel background
     cv2.rectangle(
@@ -163,27 +168,29 @@ def draw_hud(
     )
 
     lines = [
-        ("VISION - Slice 3 (Face Assoc)", (0, 215, 255), 0.50, 2),
+        ("VISION - Slice 4 (ArcFace)", (0, 215, 255), 0.48, 2),
         (
             f"Frame: {current_frame} / {total_frames if total_frames > 0 else 'N/A'}",
             (220, 220, 220),
-            0.45,
+            0.42,
             1,
         ),
-        (f"Source FPS: {source_fps:.1f}", (220, 220, 220), 0.45, 1),
+        (f"Source FPS: {source_fps:.1f}", (220, 220, 220), 0.42, 1),
         (
             f"Inference FPS: {inference_fps:.1f}",
             (0, 255, 127) if inference_fps > 0 else (150, 150, 150),
-            0.45,
+            0.42,
             1,
         ),
-        (f"Active Tracks: {active_tracks_count}", (0, 215, 255), 0.45, 1),
-        (f"Detections: {detection_count}", (220, 220, 220), 0.45, 1),
-        (f"Faces Detected: {faces_detected_count}", (255, 0, 255), 0.45, 1),
-        (f"Faces Associated: {faces_associated_count}", (0, 255, 255), 0.45, 1),
+        (f"Active Tracks: {active_tracks_count}", (0, 215, 255), 0.42, 1),
+        (f"Detections: {detection_count}", (220, 220, 220), 0.42, 1),
+        (f"Faces Detected: {faces_detected_count}", (255, 0, 255), 0.42, 1),
+        (f"Faces Associated: {faces_associated_count}", (0, 255, 255), 0.42, 1),
+        (f"Embeddings Generated: {embeddings_generated_count}", (0, 255, 127), 0.42, 1),
+        ("Embedding Dimension: 512", (200, 200, 200), 0.40, 1),
     ]
 
-    y_offset = panel_y1 + 20
+    y_offset = panel_y1 + 18
     for text, color, scale, thickness in lines:
         cv2.putText(
             hud_frame,
@@ -202,7 +209,7 @@ def draw_hud(
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="VISION Vertical Slice 3 - Face Detection & Person-Track Association"
+        description="VISION Vertical Slice 4 - ArcFace 512-d Face Embedding Generation"
     )
     parser.add_argument(
         "--video",
@@ -241,7 +248,7 @@ def main():
     args = parse_args()
 
     print("==================================================")
-    print("       VISION — Vertical Slice 3 Pipeline        ")
+    print("       VISION — Vertical Slice 4 Pipeline        ")
     print("==================================================")
     print(f" Video Path          : {args.video}")
     print(f" YOLO Model          : {args.model}")
@@ -299,13 +306,22 @@ def main():
         source.release()
         sys.exit(1)
 
-    window_name = "VISION - Vertical Slice 3 (Face Association)"
+    # 5. FaceEmbedder Initialization
+    try:
+        face_embedder = FaceEmbedder()
+    except Exception as e:
+        print(f"[ERROR] FaceEmbedder initialization failed: {e}", file=sys.stderr)
+        source.release()
+        sys.exit(1)
+
+    window_name = "VISION - Vertical Slice 4 (ArcFace Embedding)"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
     latest_detections: List[Detection] = []
     latest_tracks: List[Track] = []
     latest_faces: List[FaceDetection] = []
     latest_associations: List[FaceTrackAssociation] = []
+    latest_embeddings_map: Dict[int, FaceEmbedding] = {}
 
     frame_index = 0
     inference_count = 0
@@ -315,6 +331,7 @@ def main():
     total_detections = 0
     total_faces_detected = 0
     total_faces_associated = 0
+    total_embeddings_generated = 0
     observed_unique_track_ids: Set[int] = set()
     max_active_tracks = 0
 
@@ -332,7 +349,7 @@ def main():
             frame_index = source.current_frame
             frame_h, frame_w = frame.shape[:2]
 
-            # Frame Sampling: Run YOLO & Face Detection every Nth frame
+            # Frame Sampling: Run YOLO, Face Detection & Embedding Generation every Nth frame
             if (frame_index - 1) % args.interval == 0:
                 t0 = time.time()
 
@@ -348,7 +365,6 @@ def main():
 
                 for person in person_tracks:
                     pb = person.bbox
-                    # Safe clamp to frame boundaries
                     px1 = max(0, min(pb.x1, frame_w))
                     py1 = max(0, min(pb.y1, frame_h))
                     px2 = max(0, min(pb.x2, frame_w))
@@ -360,7 +376,6 @@ def main():
                     person_crop = frame[py1:py2, px1:px2]
                     crop_faces = face_detector.detect(person_crop)
 
-                    # Transform crop-relative coordinates to full-frame global coordinates
                     for crop_face in crop_faces:
                         fb = crop_face.bbox
                         gx1 = max(0, min(px1 + fb.x1, frame_w))
@@ -382,6 +397,28 @@ def main():
                 # D. Face-to-Track Association
                 latest_associations = associate_faces_to_tracks(latest_tracks, latest_faces)
 
+                # E. ArcFace Embedding Generation for Associated Faces Only
+                current_embeddings_map: Dict[int, FaceEmbedding] = {}
+                for assoc in latest_associations:
+                    fb = assoc.face.bbox
+                    fx1 = max(0, min(fb.x1, frame_w))
+                    fy1 = max(0, min(fb.y1, frame_h))
+                    fx2 = max(0, min(fb.x2, frame_w))
+                    fy2 = max(0, min(fb.y2, frame_h))
+
+                    if fx2 <= fx1 or fy2 <= fy1:
+                        continue
+
+                    face_crop = frame[fy1:fy2, fx1:fx2]
+                    if face_crop.size == 0:
+                        continue
+
+                    embedding = face_embedder.embed(face_crop)
+                    if embedding is not None:
+                        current_embeddings_map[id(assoc.face)] = embedding
+
+                latest_embeddings_map = current_embeddings_map
+
                 t1 = time.time()
 
                 inf_time = t1 - t0
@@ -394,6 +431,7 @@ def main():
                 total_detections += len(latest_detections)
                 total_faces_detected += len(latest_faces)
                 total_faces_associated += len(latest_associations)
+                total_embeddings_generated += len(latest_embeddings_map)
 
                 for trk in latest_tracks:
                     observed_unique_track_ids.add(trk.track_id)
@@ -408,7 +446,11 @@ def main():
 
             # Annotate frame
             annotated_frame = draw_annotations(
-                frame, latest_tracks, latest_faces, latest_associations
+                frame,
+                latest_tracks,
+                latest_faces,
+                latest_associations,
+                latest_embeddings_map,
             )
 
             # Draw HUD
@@ -422,6 +464,7 @@ def main():
                 detection_count=len(latest_detections),
                 faces_detected_count=len(latest_faces),
                 faces_associated_count=len(latest_associations),
+                embeddings_generated_count=len(latest_embeddings_map),
             )
 
             # Display frame
@@ -446,7 +489,7 @@ def main():
         else 0.0
     )
     print("==================================================")
-    print("VISION — Slice 3 Summary")
+    print("VISION — Slice 4 Summary")
     print("==================================================")
     print(f"Frames Processed       : {frame_index}")
     print(f"YOLO Inferences        : {inference_count}")
@@ -455,6 +498,8 @@ def main():
     print(f"Max Active Tracks      : {max_active_tracks}")
     print(f"Faces Detected         : {total_faces_detected}")
     print(f"Faces Associated       : {total_faces_associated}")
+    print(f"Embeddings Generated   : {total_embeddings_generated}")
+    print(f"Embedding Dimension    : {FaceEmbedder.TARGET_DIMENSION}")
     print(f"Average Inference FPS  : {avg_inf_fps:.2f}")
     print("==================================================")
 

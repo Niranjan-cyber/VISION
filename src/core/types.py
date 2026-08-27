@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Tuple
+import numpy as np
 
 
 @dataclass(frozen=True)
@@ -63,3 +64,11 @@ class FaceDetection:
 
     bbox: BoundingBox
     confidence: float
+
+
+@dataclass
+class FaceEmbedding:
+    """Represents a 512-dimensional L2-normalized face feature embedding."""
+
+    vector: np.ndarray
+    dimension: int = 512
