@@ -1,4 +1,4 @@
-# Python bytecode & cache
+# Python bytecode, cache & build artifacts
 __pycache__/
 *.py[cod]
 *$py.class
@@ -7,6 +7,9 @@ __pycache__/
 htmlcov/
 .mypy_cache/
 .ruff_cache/
+build/
+dist/
+*.egg-info/
 
 # Virtual Environments
 .venv/
@@ -14,12 +17,16 @@ venv/
 ENV/
 env/
 *.venv/
+env.bak/
+venv.bak/
 
 # Environment Variables & Secrets
 .env
 .env.*
 *.pem
 *.key
+*.p12
+*.pfx
 
 # IDE & OS Artifacts
 .idea/
@@ -29,14 +36,22 @@ env/
 *~
 .DS_Store
 Thumbs.db
+ehthumbs.db
+Desktop.ini
 
-# Video Data Files (keep directory tracked via .gitkeep)
+# Video & Data Files (directories kept tracked via .gitkeep)
 data/videos/*
 !data/videos/.gitkeep
+data/face_gallery/*
+!data/face_gallery/.gitkeep
 *.mp4
 *.avi
 *.mov
 *.mkv
+*.flv
+*.wmv
+*.h264
+*.hevc
 
 # Deep Learning Models & Checkpoints (keep directory tracked via .gitkeep)
 models/*
@@ -47,6 +62,18 @@ models/*
 *.engine
 *.bin
 *.safetensors
+*.tflite
+*.h5
+*.ckpt
+*.weights
+
+# Local Databases & Cache
+*.sqlite
+*.sqlite3
+*.db
+*.rdb
+*.pgdump
+.cache/
 
 # Logs & Temporary Files
 *.log
