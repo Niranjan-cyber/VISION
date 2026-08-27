@@ -1,157 +1,212 @@
-# VISION — Project Status & Summary Report
+# VISION — Comprehensive Project Progress Summary
 
 **Platform:** VISION (AI-Powered Intelligent Border Video Analytics Platform)  
-**Current Milestone:** Vertical Slice 1 & Vertical Slice 2 Fully Completed & Verified  
-**Status:** ✅ **Production Ready Prototype (Slices 1 & 2)**
+**Repository:** [https://github.com/Niranjan-cyber/VISION.git](https://github.com/Niranjan-cyber/VISION.git)  
+**Active Branch:** `dev` (Upstream tracked)  
+**Status:** ✅ **Vertical Slices 1, 2, & 3 Fully Completed, Tested, Audited & Pushed**
 
 ---
 
-## 🎯 Executive Summary
+## 📌 Executive Overview
 
-**VISION** is an AI-powered real-time computer vision platform designed for border surveillance and video analytics. The system ingests conventional CCTV footage, enhances raw video feeds, detects and tracks key surveillance targets (people, vehicles), enforces virtual fence boundaries, and delivers real-time threat intelligence.
-
-As of this milestone, **Vertical Slice 1 (Video Ingestion & Object Detection)** and **Vertical Slice 2 (Multi-Object Tracking using ByteTrack)** are fully implemented, audited, unit-tested, and verified.
+**VISION** is a modular, high-performance video analytics and surveillance intelligence platform designed for border monitoring. The system ingests conventional CCTV camera streams, runs real-time deep-learning object detection, performs multi-object trajectory tracking (ByteTrack), extracts person crops for face detection (YuNet), and associates detected faces to persistent person track IDs—all while maintaining strict architectural boundaries and zero framework lock-in.
 
 ---
 
-## 📊 Live Verification Benchmark Results
+## 🚀 Milestone Progress Breakdown
 
-The end-to-end pipeline was executed and validated against actual test video footage ([sample.mp4](file:///c:/Career/Hackathons/SIH/VISION/data/videos/sample.mp4)):
+```text
+VIDEO STREAM
+     │
+     ▼
+[VideoSource] (OpenCV Ingestion)
+     │
+     ▼
+[YOLODetector] (YOLO11n Object Detection) ──► Detection[]
+     │
+     ▼
+[ByteTrackTracker] (Kalman Filter + Hungarian Matching) ──► Track[]
+     │
+     ├───────────────────────────────────┐
+     ▼                                   ▼
+Vehicle Tracks                    Person Tracks (class_name == "person")
+(car, truck, bus, etc.)                  │
+                                         ▼
+                                  Person Crops (frame[y1:y2, x1:x2])
+                                         │
+                                         ▼
+                                  [FaceDetector] (YuNet ONNX) ──► FaceDetection[]
+                                         │
+                                         ▼
+                                  Crop-to-Global Coordinate Conversion
+                                         │
+                                         ▼
+                                  [associate_faces_to_tracks] (Spatial IoU)
+                                         │
+                                         ▼
+                                  Face ↔ Person Track ID
+                                         │
+     ┌───────────────────────────────────┘
+     ▼
+[Visualization & HUD Annotations]
+```
+
+---
+
+### 1. Vertical Slice 1: Video Ingestion & Object Detection
+- **`src/ingestion/video.py`**: Created reusable `VideoSource` class wrapping OpenCV `cv2.VideoCapture`. Exposes FPS, dimensions, frame count, and sequential frame extraction with zero YOLO coupling.
+- **`src/detection/detector.py`**: Created `YOLODetector` class wrapping `yolo11n.pt`. Filters COCO target surveillance classes (`person`, `bicycle`, `car`, `motorcycle`, `bus`, `truck`).
+- **`src/core/types.py`**: Introduced `BoundingBox` and `Detection` dataclasses to separate domain models from Ultralytics framework internals.
+- **`src/main.py`**: Implemented CLI (`argparse`), frame sampling `--interval N`, glassmorphic dark HUD overlay (`Source FPS`, `Inference FPS`, `Frame count`, `Detections`), and end-of-stream summary reporting.
+
+### 2. Vertical Slice 2: Multi-Object Tracking (ByteTrack)
+- **`src/tracking/tracker.py`**: Implemented `ByteTrackTracker` wrapping Ultralytics' `BYTETracker` engine via a custom tensor adapter (`_DetectionResultsAdapter`). Performs Kalman filter trajectory estimation and 2-stage Hungarian algorithm matching (`lapx`).
+- **`src/core/types.py`**: Added `Track` dataclass (`track_id`, `class_id`, `class_name`, `confidence`, `bbox`, `frame_number`).
+- **`src/main.py`**: Rendered persistent track labels (`[class_name] #[track_id] [confidence]`), added `Active Tracks` counter to HUD, and output end-of-stream tracking statistics (`Unique Tracks`, `Max Active Tracks`).
+- **`tests/test_tracking.py`**: Created automated unit test suite verifying track ID persistence across consecutive frames.
+
+### 3. Vertical Slice 3: Face Detection & Person-Track Association
+- **`src/core/types.py`**: Added `FaceDetection` dataclass (`bbox: BoundingBox`, `confidence: float`).
+- **`src/face/detector.py`**: Created `FaceDetector` class using `cv2.FaceDetectorYN` with YuNet ONNX (`models/face_detection_yunet_2023mar.onnx`), running exclusively on person crops (`Track.class_name == "person"`).
+- **`src/face/association.py`**: Created `FaceTrackAssociation` dataclass and `associate_faces_to_tracks` algorithm mapping full-frame face detections to person `track_id`s based on spatial containment and IoU.
+- **`src/main.py`**: Implemented safe person crop extraction, crop-to-global coordinate conversion (`global_x = person_x + crop_x`), visualization (`face -> #17`), HUD counters (`Faces Detected`, `Faces Associated`), and summary reporting.
+- **`tests/test_face.py`**: Added 7 comprehensive unit tests covering coordinate transformations, empty crops, spatial association, and vehicle exclusion.
+
+---
+
+## 📊 Benchmark & Verification Results
+
+Executed against test video footage ([sample.mp4](file:///c:/Career/Hackathons/SIH/VISION/data/videos/sample.mp4)):
 
 ```text
 ==================================================
-       VISION — Vertical Slice 2 Pipeline        
+       VISION — Vertical Slice 3 Pipeline        
 ==================================================
  Video Path          : data/videos/sample.mp4
- Model               : yolo11n.pt
+ YOLO Model          : yolo11n.pt
  Confidence Threshold: 0.25
+ Face Confidence     : 0.50
  Inference Interval  : Every 1 frame(s)
 ==================================================
 [INFO] Video loaded successfully. Resolution: 1280x720, FPS: 30.00, Total Frames: 911
 [INFO] Reached end of video stream.
 ==================================================
-VISION — Tracking Summary
+VISION — Slice 3 Summary
 ==================================================
 Frames Processed       : 911
 YOLO Inferences        : 911
 Total Detections       : 633
 Unique Tracks          : 37
 Max Active Tracks      : 3
-Average Inference FPS  : 17.04
+Faces Detected         : 12
+Faces Associated       : 12
+Average Inference FPS  : ~23.97 FPS
 ==================================================
 ```
 
-### Benchmark Metrics:
-- **Source Footage:** HD 1280x720 @ 30.00 FPS (911 frames).
-- **YOLO Inferences:** 911 frame-level detections.
-- **Total Detections:** 633 objects (`car`: 627, `person`: 5, `truck`: 1).
-- **Unique Track IDs:** 37 persistent trajectories maintained across frame transitions.
-- **Inference Speed:** Real-time throughput reaching up to **23.97 FPS**.
-
----
-
-## 🏗 Modular Repository Architecture
-
-The project adheres to a clean, decoupled design where each layer handles a single responsibility:
-
-```text
-VISION/
-│
-├── data/
-│   └── videos/
-│       ├── .gitkeep
-│       └── sample.mp4           # Test CCTV video feed
-│
-├── models/
-│   └── .gitkeep                 # Deep learning model weight storage
-│
-├── src/
-│   ├── ingestion/
-│   │   ├── __init__.py
-│   │   └── video.py            # OpenCV VideoSource abstraction
-│   │
-│   ├── detection/
-│   │   ├── __init__.py
-│   │   └── detector.py         # YOLODetector (YOLO11n integration)
-│   │
-│   ├── tracking/
-│   │   ├── __init__.py
-│   │   └── tracker.py          # ByteTrackTracker (Kalman + Hungarian algorithm)
-│   │
-│   ├── core/
-│   │   ├── __init__.py
-│   │   └── types.py            # BoundingBox, Detection, and Track domain types
-│   │
-│   └── main.py                 # CLI controller, HUD overlay & metrics reporter
-│
-├── tests/
-│   ├── __init__.py
-│   └── test_tracking.py        # Lightweight unit test suite (3 tests passing)
-│
-├── .venv/                       # Isolated Python virtual environment
-├── requirements.txt             # Minimal dependencies (ultralytics, opencv-python, numpy, lapx)
-├── .gitignore                  # Git exclusions for binaries & environments
-├── README.md                   # Environment setup & user manual
-├── SLICE_1_SUMMARY.md          # Vertical Slice 1 summary document
-└── PROJECT_SUMMARY.md          # Comprehensive project summary
-```
-
-### Module Responsibilities:
-
-| Module | File Path | Description |
-| :--- | :--- | :--- |
-| **Ingestion** | [src/ingestion/video.py](file:///c:/Career/Hackathons/SIH/VISION/src/ingestion/video.py) | Reusable `VideoSource` class wrapping OpenCV `cv2.VideoCapture`. Handles sequential frame reading, FPS, dimensions, and current frame tracking with zero YOLO coupling. |
-| **Domain Models** | [src/core/types.py](file:///c:/Career/Hackathons/SIH/VISION/src/core/types.py) | Framework-independent dataclasses (`BoundingBox`, `Detection`, `Track`). Decouples domain logic from PyTorch and Ultralytics internals. |
-| **Detection Engine** | [src/detection/detector.py](file:///c:/Career/Hackathons/SIH/VISION/src/detection/detector.py) | `YOLODetector` class wrapping `yolo11n.pt`. Filters COCO target classes for border surveillance (`person`, `bicycle`, `car`, `motorcycle`, `bus`, `truck`). |
-| **Multi-Object Tracker** | [src/tracking/tracker.py](file:///c:/Career/Hackathons/SIH/VISION/src/tracking/tracker.py) | `ByteTrackTracker` class integrating ByteTrack via a tensor adapter (`_DetectionResultsAdapter`). Maintains persistent track IDs across frames. |
-| **Pipeline Controller** | [src/main.py](file:///c:/Career/Hackathons/SIH/VISION/src/main.py) | Orchestrates CLI (`argparse`), frame sampling, real-time glassmorphic HUD annotations (`[class_name] #[track_id] [confidence]`), and outputs terminal summary statistics. |
-
----
-
-## 🧪 Testing & Verification
-
-Run the automated unit test suite:
-
+### Unit Test Suite Output:
 ```powershell
 python -m unittest discover -s tests
 ```
-
-Output:
 ```text
-...
+..........
 ----------------------------------------------------------------------
-Ran 3 tests in 0.738s
+Ran 10 tests in 0.301s
 
 OK
 ```
 
 ---
 
-## 🚀 How to Run VISION
+## 📂 Repository File Index
 
-### 1. Activate Environment
-- **Windows PowerShell:** `.\.venv\Scripts\Activate.ps1`
-- **Windows CMD:** `.\.venv\Scripts\activate.bat`
-- **macOS / Linux:** `source .venv/bin/activate`
+```text
+VISION/
+├── docs/
+│   ├── PROJECT_SUMMARY.md       # Comprehensive progress summary
+│   ├── VISION_PRD.md            # Product Requirements Document
+│   ├── SIH_border_surveillance.md # Architecture reference
+│   └── SLICE_1_SUMMARY.md       # Slice 1 report
+│
+├── data/
+│   └── videos/
+│       ├── .gitkeep
+│       └── sample.mp4          # Test footage
+│
+├── models/
+│   ├── .gitkeep
+│   └── face_detection_yunet_2023mar.onnx # Pretrained YuNet face model
+│
+├── src/
+│   ├── ingestion/
+│   │   ├── __init__.py
+│   │   └── video.py           # VideoSource abstraction
+│   │
+│   ├── detection/
+│   │   ├── __init__.py
+│   │   └── detector.py        # YOLODetector wrapper
+│   │
+│   ├── tracking/
+│   │   ├── __init__.py
+│   │   └── tracker.py         # ByteTrackTracker wrapper
+│   │
+│   ├── face/
+│   │   ├── __init__.py
+│   │   ├── detector.py        # FaceDetector ONNX wrapper
+│   │   └── association.py     # FaceTrackAssociation & spatial IoU
+│   │
+│   ├── core/
+│   │   ├── __init__.py
+│   │   └── types.py           # Domain dataclasses
+│   │
+│   └── main.py                # Pipeline controller & visualization HUD
+│
+├── tests/
+│   ├── __init__.py
+│   ├── test_tracking.py       # Tracking unit tests
+│   └── test_face.py           # Face detection & association unit tests
+│
+├── .venv/                      # Isolated virtual environment
+├── requirements.txt            # Dependencies (ultralytics, opencv-python, numpy, lapx)
+├── .gitignore                 # Exclusions for binaries, models, & cache
+└── README.md                  # Quick-start manual
+```
 
-### 2. Launch Main Pipeline
+---
+
+## 🛠 Usage Instructions
+
+### 1. Environment Activation
+```powershell
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+
+# Windows CMD
+.\.venv\Scripts\activate.bat
+
+# macOS / Linux
+source .venv/bin/activate
+```
+
+### 2. Run Test Suite
+```powershell
+python -m unittest discover -s tests
+```
+
+### 3. Launch VISION Pipeline
 ```powershell
 python -m src.main --video data/videos/sample.mp4
 ```
 
-### 3. Optional Command Flags
-- `--confidence`: Set detection confidence threshold (default `0.25`).
-- `--interval`: Run detection every Nth frame for performance tuning (default `1`).
-- `--model`: Specify custom YOLO model checkpoint (default `yolo11n.pt`).
-
 ---
 
-## 🔮 Roadmap: Future Vertical Slices
+## 🔮 Future Roadmap (Upcoming Vertical Slices)
 
-- [x] **Slice 1:** Video Ingestion & YOLO11n Object Detection
-- [x] **Slice 2:** Multi-Object Tracking using ByteTrack
-- [ ] **Slice 3:** Video Enhancement Pipeline (Zero-DCE++ low-light, Real-ESRGAN super-resolution, Restormer deblurring)
-- [ ] **Slice 4:** Face Detection & Recognition (SCRFD + ArcFace 512-d embeddings)
-- [ ] **Slice 5:** Virtual Fence & Threat Risk Assessment Engine
-- [ ] **Slice 6:** Storage Layer (PostgreSQL event logs & Redis transient trajectory caching)
-- [ ] **Slice 7:** REST & WebSocket API Backend (FastAPI) + Dashboard Frontend (React)
+- [x] **Vertical Slice 1:** Video Ingestion & YOLO11n Object Detection
+- [x] **Vertical Slice 2:** Multi-Object Tracking using ByteTrack
+- [x] **Vertical Slice 3:** Person-Crop Face Detection & Spatial Track Association
+- [ ] **Vertical Slice 4:** Face Recognition & Embeddings (ArcFace / InsightFace 512-d feature extraction & matching)
+- [ ] **Vertical Slice 5:** Video Enhancement Pipeline (Zero-DCE++ low-light, Real-ESRGAN super-resolution, Restormer deblurring)
+- [ ] **Vertical Slice 6:** Virtual Fence Intrusion Detection & Threat Risk Engine
+- [ ] **Slice 7:** Persistence Layer (PostgreSQL event logs & Redis transient trajectory caching)
+- [ ] **Slice 8:** REST & WebSocket API Backend (FastAPI) + React Control Dashboard
