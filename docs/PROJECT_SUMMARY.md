@@ -2,14 +2,14 @@
 
 **Platform:** VISION (AI-Powered Intelligent Border Video Analytics Platform)  
 **Repository:** [https://github.com/Niranjan-cyber/VISION.git](https://github.com/Niranjan-cyber/VISION.git)  
-**Active Branch:** `dev` (Upstream tracked)  
-**Status:** ✅ **Vertical Slices 1, 2, 3, & 4 Fully Completed, Tested, Audited & Verified**
+**Active Branch:** `main`  
+**Status:** ✅ **Vertical Slices 1, 2, 3, 4, & 5 Fully Completed, Tested, Audited & Verified**
 
 ---
 
 ## 📌 Executive Overview
 
-**VISION** is a modular, high-performance video analytics and surveillance intelligence platform designed for border monitoring. The system ingests conventional CCTV camera streams, runs real-time deep-learning object detection, performs multi-object trajectory tracking (ByteTrack), extracts person crops for face detection (YuNet), associates detected faces to persistent person track IDs, and generates 512-dimensional L2-normalized feature embeddings using ArcFace—all while maintaining strict architectural boundaries and zero framework lock-in.
+**VISION** is a modular, high-performance video analytics and surveillance intelligence platform designed for border monitoring. The system ingests conventional CCTV camera streams, runs real-time deep-learning object detection, performs multi-object trajectory tracking (ByteTrack), extracts person crops for face detection (YuNet), associates detected faces to persistent person track IDs, generates 512-dimensional L2-normalized feature embeddings using ArcFace, and matches embeddings against an in-memory reference face gallery via cosine similarity and configurable thresholding—all while maintaining strict architectural boundaries and zero framework lock-in.
 
 ---
 
@@ -55,7 +55,18 @@ Vehicle Tracks                    Person Tracks (class_name == "person")
                                          ▼
                                   [l2_normalize] ──► FaceEmbedding (512 dimensions)
                                          │
-     ┌───────────────────────────────────┘
+                                         ▼
+                                  [FaceGallery] (In-Memory Reference Vectors)
+                                         │
+                                         ▼
+                                  [FaceMatcher] (Cosine Similarity)
+                                         │
+                                         ▼
+                                  Threshold Check (similarity >= threshold)
+                                     ↙       ↘
+                               Known          Unknown
+                                 │               │
+     ┌───────────────────────────┴───────────────┘
      ▼
 [Visualization & HUD Annotations]
 ```
@@ -70,18 +81,20 @@ Full HD 1080p footage processing test:
 
 ```text
 ==================================================
-       VISION — Vertical Slice 4 Pipeline        
+       VISION — Vertical Slice 5 Pipeline        
 ==================================================
  Video Path          : data/videos/sample1.mp4
  YOLO Model          : yolo11n.pt
  Confidence Threshold: 0.25
  Face Confidence     : 0.50
+ Recognition Thresh  : 0.60
+ Gallery Directory   : data/face_gallery
  Inference Interval  : Every 1 frame(s)
 ==================================================
 [INFO] Video loaded successfully. Resolution: 1920x1080, FPS: 25.00, Total Frames: 611
 [INFO] Reached end of video stream.
 ==================================================
-VISION — Slice 4 Summary
+VISION — Slice 5 Summary
 ==================================================
 Frames Processed       : 611
 YOLO Inferences        : 611
@@ -91,7 +104,9 @@ Max Active Tracks      : 7
 Faces Detected         : 671
 Faces Associated       : 671
 Embeddings Generated   : 671
-Embedding Dimension    : 512
+Recognized Faces       : 0
+Unknown Faces          : 671
+Recognition Threshold  : 0.60
 Average Inference FPS  : 2.86
 ==================================================
 ```
@@ -100,7 +115,7 @@ Average Inference FPS  : 2.86
 
 ```text
 ==================================================
-VISION — Slice 4 Summary
+VISION — Slice 5 Summary
 ==================================================
 Frames Processed       : 911
 YOLO Inferences        : 911
@@ -110,7 +125,9 @@ Max Active Tracks      : 3
 Faces Detected         : 12
 Faces Associated       : 12
 Embeddings Generated   : 12
-Embedding Dimension    : 512
+Recognized Faces       : 0
+Unknown Faces          : 12
+Recognition Threshold  : 0.60
 Average Inference FPS  : 23.97
 ==================================================
 ```
@@ -145,6 +162,13 @@ Average Inference FPS  : 23.97
 - **`src/main.py`**: Integrated face crop extraction for associated faces only, ArcFace inference, visualization indicators (`embedding ✓`), HUD counters (`Embeddings Generated`, `Embedding Dimension: 512`), and summary reporting.
 - **`tests/test_embeddings.py`**: Added 8 unit tests validating 512-d output contract, L2 norm unit length, zero vector safety, full-frame crop extraction, and domain decoupling.
 
+### 5. Vertical Slice 5: Face Recognition & Identity Matching
+- **`src/core/types.py`**: Added `IdentityMatch` dataclass (`identity: Optional[str]`, `similarity: float`, `is_match: bool`).
+- **`src/face/gallery.py`**: Implemented `FaceGallery` (in-memory container storing 512-d reference vectors per identity) and `load_gallery_from_dir` (scans `data/face_gallery/<identity>/*.jpg` to enroll identities).
+- **`src/face/matcher.py`**: Implemented `FaceMatcher` (cosine similarity matcher via dot product on L2-normalized vectors against threshold).
+- **`src/main.py`**: Integrated track-level identity caching (`track_id -> IdentityMatch`), face visualization (`face -> #17 | person_001 (0.86)` vs `face -> #17 | Unknown (0.43)`), HUD counters (`Recognized Faces`, `Unknown Faces`, `Recog Threshold`), CLI option `--face-threshold` (default `0.60`), and end-of-stream summary.
+- **`tests/test_face_matching.py`**: Added 12 unit tests validating 512-d gallery enrollment, empty gallery safety, thresholding, similarity scoring, and domain decoupling.
+
 ---
 
 ## 🧪 Automated Unit Test Suite
@@ -157,9 +181,9 @@ python -m unittest discover -s tests
 
 Output:
 ```text
-..................
+..............................
 ----------------------------------------------------------------------
-Ran 18 tests in 1.371s
+Ran 30 tests in 0.845s
 
 OK
 ```
@@ -177,6 +201,8 @@ VISION/
 │   └── SLICE_1_SUMMARY.md       # Slice 1 report
 │
 ├── data/
+│   ├── face_gallery/           # Reference identity images directory
+│   │   └── .gitkeep
 │   └── videos/
 │       ├── .gitkeep
 │       ├── sample.mp4          # 720p Test footage
@@ -205,7 +231,9 @@ VISION/
 │   │   ├── detector.py        # FaceDetector ONNX wrapper
 │   │   ├── association.py     # FaceTrackAssociation & spatial IoU
 │   │   ├── preprocessing.py   # Crop scaling & L2 normalization
-│   │   └── embedder.py        # FaceEmbedder ArcFace ONNX wrapper
+│   │   ├── embedder.py        # FaceEmbedder ArcFace ONNX wrapper
+│   │   ├── gallery.py         # FaceGallery & load_gallery_from_dir
+│   │   └── matcher.py         # FaceMatcher cosine similarity search
 │   │
 │   ├── core/
 │   │   ├── __init__.py
@@ -217,7 +245,8 @@ VISION/
 │   ├── __init__.py
 │   ├── test_tracking.py       # Tracking unit tests
 │   ├── test_face.py           # Face detection & association unit tests
-│   └── test_embeddings.py     # ArcFace embedding unit tests
+│   ├── test_embeddings.py     # ArcFace embedding unit tests
+│   └── test_face_matching.py   # Identity matching & gallery unit tests
 │
 ├── .venv/                      # Isolated virtual environment
 ├── requirements.txt            # Dependencies (ultralytics, opencv-python, numpy, lapx)
@@ -248,12 +277,17 @@ python -m unittest discover -s tests
 
 ### 3. Launch VISION Pipeline
 ```powershell
-# Run on sample1.mp4 (Full HD 1080p)
-python -m src.main --video data/videos/sample1.mp4
-
-# Run on sample.mp4 (720p)
-python -m src.main --video data/videos/sample.mp4
+# Run with face recognition threshold 0.60
+python -m src.main --video data/videos/sample.mp4 --face-threshold 0.60
 ```
+
+---
+
+## ⚠️ Known Limitations
+
+- **Prototype Recognition Threshold**: Default threshold (`0.60`) is a prototype threshold requiring calibration against domain-specific validation datasets.
+- **In-Memory Gallery**: Gallery reference vectors are held in Python memory (`FaceGallery`). No persistent database (PostgreSQL / Redis / pgvector / FAISS) is used in Slice 5.
+- **Image Alignment & Quality**: Recognition quality depends directly on lighting, resolution, and pose of the face crop extracted from video feed.
 
 ---
 
@@ -263,7 +297,7 @@ python -m src.main --video data/videos/sample.mp4
 - [x] **Vertical Slice 2:** Multi-Object Tracking using ByteTrack
 - [x] **Vertical Slice 3:** Person-Crop Face Detection & Spatial Track Association
 - [x] **Vertical Slice 4:** ArcFace 512-d Face Embedding Generation
-- [ ] **Vertical Slice 5:** Face Identity Matching & Gallery Search (Cosine Similarity & Thresholding)
+- [x] **Vertical Slice 5:** Face Identity Matching & In-Memory Gallery Search
 - [ ] **Vertical Slice 6:** Video Enhancement Pipeline (Zero-DCE++ low-light, Real-ESRGAN super-resolution, Restormer deblurring)
 - [ ] **Vertical Slice 7:** Virtual Fence Intrusion Detection & Threat Risk Engine
 - [ ] **Vertical Slice 8:** Persistence Layer (PostgreSQL event logs & Redis transient trajectory caching)

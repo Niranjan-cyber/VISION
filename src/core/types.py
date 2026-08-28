@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 import numpy as np
 
 
@@ -72,3 +72,12 @@ class FaceEmbedding:
 
     vector: np.ndarray
     dimension: int = 512
+
+
+@dataclass
+class IdentityMatch:
+    """Represents the result of matching a face embedding against the face gallery."""
+
+    identity: Optional[str]
+    similarity: float
+    is_match: bool

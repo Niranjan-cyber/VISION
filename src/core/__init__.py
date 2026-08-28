@@ -3,6 +3,7 @@ from src.core.types import (
     Detection,
     FaceDetection,
     FaceEmbedding,
+    IdentityMatch,
     Track,
 )
 
@@ -11,5 +12,6 @@ __all__ = [
     "Detection",
     "FaceDetection",
     "FaceEmbedding",
+    "IdentityMatch",
     "Track",
 ]

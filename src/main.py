@@ -6,11 +6,20 @@ from typing import Dict, List, Set, Tuple
 import cv2
 import numpy as np
 
-from src.core.types import BoundingBox, Detection, FaceDetection, FaceEmbedding, Track
+from src.core.types import (
+    BoundingBox,
+    Detection,
+    FaceDetection,
+    FaceEmbedding,
+    IdentityMatch,
+    Track,
+)
 from src.detection.detector import YOLODetector
 from src.face.association import FaceTrackAssociation, associate_faces_to_tracks
 from src.face.detector import FaceDetector
 from src.face.embedder import FaceEmbedder
+from src.face.gallery import load_gallery_from_dir
+from src.face.matcher import FaceMatcher
 from src.ingestion.video import VideoSource
 from src.tracking.tracker import ByteTrackTracker
 
@@ -23,7 +32,8 @@ CLASS_COLORS: Dict[str, Tuple[int, int, int]] = {
     "motorcycle": (255, 255, 0), # Cyan
     "bicycle": (0, 255, 255),    # Bright Yellow
 }
-FACE_COLOR = (255, 0, 255)       # Magenta for faces
+FACE_KNOWN_COLOR = (0, 255, 127)   # Spring Green for recognized identity match
+FACE_UNKNOWN_COLOR = (255, 0, 255) # Magenta for unknown / unassociated face
 DEFAULT_COLOR = (200, 200, 200)
 
 
@@ -32,9 +42,9 @@ def draw_annotations(
     tracks: List[Track],
     faces: List[FaceDetection],
     associations: List[FaceTrackAssociation],
-    embeddings_map: Dict[int, FaceEmbedding],
+    track_identity_map: Dict[int, IdentityMatch],
 ) -> np.ndarray:
-    """Renders tracked object bounding boxes, face boxes, and embedding status indicators."""
+    """Renders tracked object bounding boxes, face boxes, and identity match status indicators."""
     annotated = frame.copy()
     h, w = annotated.shape[:2]
 
@@ -81,7 +91,7 @@ def draw_annotations(
             lineType=cv2.LINE_AA,
         )
 
-    # 2. Render Face Boxes & Embedding Indicators
+    # 2. Render Face Boxes & Identity Match Labels
     for face in faces:
         bbox = face.bbox
         fx1 = max(0, min(bbox.x1, w - 1))
@@ -92,18 +102,21 @@ def draw_annotations(
         if fx2 <= fx1 or fy2 <= fy1:
             continue
 
-        cv2.rectangle(annotated, (fx1, fy1), (fx2, fy2), FACE_COLOR, thickness=2)
-
         assoc_track_id = associated_map.get(id(face))
-        has_embedding = id(face) in embeddings_map
+        match_info = track_identity_map.get(assoc_track_id) if assoc_track_id is not None else None
 
-        if assoc_track_id is not None:
-            if has_embedding:
-                face_label = f"face -> #{assoc_track_id} | emb [check]"
-            else:
-                face_label = f"face -> #{assoc_track_id}"
+        if match_info is not None and match_info.is_match:
+            box_color = FACE_KNOWN_COLOR
+            face_label = f"face -> #{assoc_track_id} | {match_info.identity} ({match_info.similarity:.2f})"
+        elif assoc_track_id is not None:
+            box_color = FACE_UNKNOWN_COLOR
+            sim_str = f" ({match_info.similarity:.2f})" if match_info is not None else ""
+            face_label = f"face -> #{assoc_track_id} | Unknown{sim_str}"
         else:
+            box_color = FACE_UNKNOWN_COLOR
             face_label = f"face {face.confidence:.2f}"
+
+        cv2.rectangle(annotated, (fx1, fy1), (fx2, fy2), box_color, thickness=2)
 
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 0.42
@@ -115,14 +128,14 @@ def draw_annotations(
         label_y2 = label_y1 + text_h + 4
         label_x2 = min(fx1 + text_w + 6, w)
 
-        cv2.rectangle(annotated, (fx1, label_y1), (label_x2, label_y2), FACE_COLOR, cv2.FILLED)
+        cv2.rectangle(annotated, (fx1, label_y1), (label_x2, label_y2), box_color, cv2.FILLED)
         cv2.putText(
             annotated,
             face_label,
             (fx1 + 3, label_y2 - baseline - 2),
             font,
             font_scale,
-            (255, 255, 255),
+            (0, 0, 0) if (match_info and match_info.is_match) else (255, 255, 255),
             thickness,
             lineType=cv2.LINE_AA,
         )
@@ -141,13 +154,16 @@ def draw_hud(
     faces_detected_count: int,
     faces_associated_count: int,
     embeddings_generated_count: int,
+    recognized_faces_count: int,
+    unknown_faces_count: int,
+    recog_threshold: float,
 ) -> np.ndarray:
     """Draws runtime status HUD on top-left of frame."""
     hud_frame = frame.copy()
     overlay = hud_frame.copy()
 
     panel_x1, panel_y1 = 15, 15
-    panel_x2, panel_y2 = 285, 235
+    panel_x2, panel_y2 = 295, 275
 
     # Glassmorphic dark panel background
     cv2.rectangle(
@@ -168,7 +184,7 @@ def draw_hud(
     )
 
     lines = [
-        ("VISION - Slice 4 (ArcFace)", (0, 215, 255), 0.48, 2),
+        ("VISION - Slice 5 (Face Recog)", (0, 215, 255), 0.48, 2),
         (
             f"Frame: {current_frame} / {total_frames if total_frames > 0 else 'N/A'}",
             (220, 220, 220),
@@ -186,8 +202,10 @@ def draw_hud(
         (f"Detections: {detection_count}", (220, 220, 220), 0.42, 1),
         (f"Faces Detected: {faces_detected_count}", (255, 0, 255), 0.42, 1),
         (f"Faces Associated: {faces_associated_count}", (0, 255, 255), 0.42, 1),
-        (f"Embeddings Generated: {embeddings_generated_count}", (0, 255, 127), 0.42, 1),
-        ("Embedding Dimension: 512", (200, 200, 200), 0.40, 1),
+        (f"Embeddings Gen: {embeddings_generated_count}", (200, 200, 200), 0.42, 1),
+        (f"Recognized Faces: {recognized_faces_count}", (0, 255, 127), 0.42, 1),
+        (f"Unknown Faces: {unknown_faces_count}", (255, 0, 255), 0.42, 1),
+        (f"Recog Threshold: {recog_threshold:.2f}", (200, 200, 200), 0.40, 1),
     ]
 
     y_offset = panel_y1 + 18
@@ -209,7 +227,7 @@ def draw_hud(
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="VISION Vertical Slice 4 - ArcFace 512-d Face Embedding Generation"
+        description="VISION Vertical Slice 5 - Face Recognition & Identity Matching Pipeline"
     )
     parser.add_argument(
         "--video",
@@ -230,6 +248,18 @@ def parse_args():
         help="Confidence threshold for Face detection (default: 0.50)",
     )
     parser.add_argument(
+        "--face-threshold",
+        type=float,
+        default=0.60,
+        help="Cosine similarity threshold for Face Recognition (default: 0.60)",
+    )
+    parser.add_argument(
+        "--gallery-dir",
+        type=str,
+        default="data/face_gallery",
+        help="Path to face gallery directory (default: data/face_gallery)",
+    )
+    parser.add_argument(
         "--interval",
         type=int,
         default=1,
@@ -248,12 +278,14 @@ def main():
     args = parse_args()
 
     print("==================================================")
-    print("       VISION — Vertical Slice 4 Pipeline        ")
+    print("       VISION — Vertical Slice 5 Pipeline        ")
     print("==================================================")
     print(f" Video Path          : {args.video}")
     print(f" YOLO Model          : {args.model}")
     print(f" Confidence Threshold: {args.confidence}")
     print(f" Face Confidence     : {args.face_confidence}")
+    print(f" Recognition Thresh  : {args.face_threshold}")
+    print(f" Gallery Directory   : {args.gallery_dir}")
     print(f" Inference Interval  : Every {args.interval} frame(s)")
     print("==================================================")
 
@@ -314,14 +346,27 @@ def main():
         source.release()
         sys.exit(1)
 
-    window_name = "VISION - Vertical Slice 4 (ArcFace Embedding)"
+    # 6. FaceGallery & FaceMatcher Initialization
+    try:
+        gallery = load_gallery_from_dir(
+            args.gallery_dir, face_detector, face_embedder
+        )
+        face_matcher = FaceMatcher(gallery, threshold=args.face_threshold)
+    except Exception as e:
+        print(f"[ERROR] Face Gallery/Matcher initialization failed: {e}", file=sys.stderr)
+        source.release()
+        sys.exit(1)
+
+    window_name = "VISION - Vertical Slice 5 (Face Recognition)"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
     latest_detections: List[Detection] = []
     latest_tracks: List[Track] = []
     latest_faces: List[FaceDetection] = []
     latest_associations: List[FaceTrackAssociation] = []
-    latest_embeddings_map: Dict[int, FaceEmbedding] = {}
+
+    # Track-level identity cache: track_id -> IdentityMatch
+    track_identity_cache: Dict[int, IdentityMatch] = {}
 
     frame_index = 0
     inference_count = 0
@@ -332,6 +377,8 @@ def main():
     total_faces_detected = 0
     total_faces_associated = 0
     total_embeddings_generated = 0
+    total_recognized_faces = 0
+    total_unknown_faces = 0
     observed_unique_track_ids: Set[int] = set()
     max_active_tracks = 0
 
@@ -349,7 +396,7 @@ def main():
             frame_index = source.current_frame
             frame_h, frame_w = frame.shape[:2]
 
-            # Frame Sampling: Run YOLO, Face Detection & Embedding Generation every Nth frame
+            # Frame Sampling: Run YOLO, Face Detection, Embedding & Recognition every Nth frame
             if (frame_index - 1) % args.interval == 0:
                 t0 = time.time()
 
@@ -397,27 +444,45 @@ def main():
                 # D. Face-to-Track Association
                 latest_associations = associate_faces_to_tracks(latest_tracks, latest_faces)
 
-                # E. ArcFace Embedding Generation for Associated Faces Only
-                current_embeddings_map: Dict[int, FaceEmbedding] = {}
+                # E. Face Recognition for Associated Faces
+                frame_recognized_count = 0
+                frame_unknown_count = 0
+
                 for assoc in latest_associations:
-                    fb = assoc.face.bbox
-                    fx1 = max(0, min(fb.x1, frame_w))
-                    fy1 = max(0, min(fb.y1, frame_h))
-                    fx2 = max(0, min(fb.x2, frame_w))
-                    fy2 = max(0, min(fb.y2, frame_h))
+                    track_id = assoc.track_id
 
-                    if fx2 <= fx1 or fy2 <= fy1:
-                        continue
+                    # Check track-level identity cache
+                    if track_id in track_identity_cache:
+                        match_result = track_identity_cache[track_id]
+                    else:
+                        fb = assoc.face.bbox
+                        fx1 = max(0, min(fb.x1, frame_w))
+                        fy1 = max(0, min(fb.y1, frame_h))
+                        fx2 = max(0, min(fb.x2, frame_w))
+                        fy2 = max(0, min(fb.y2, frame_h))
 
-                    face_crop = frame[fy1:fy2, fx1:fx2]
-                    if face_crop.size == 0:
-                        continue
+                        if fx2 <= fx1 or fy2 <= fy1:
+                            continue
 
-                    embedding = face_embedder.embed(face_crop)
-                    if embedding is not None:
-                        current_embeddings_map[id(assoc.face)] = embedding
+                        face_crop = frame[fy1:fy2, fx1:fx2]
+                        if face_crop.size == 0:
+                            continue
 
-                latest_embeddings_map = current_embeddings_map
+                        embedding = face_embedder.embed(face_crop)
+                        if embedding is not None:
+                            total_embeddings_generated += 1
+                            match_result = face_matcher.match(embedding)
+                            track_identity_cache[track_id] = match_result
+                        else:
+                            match_result = IdentityMatch(identity=None, similarity=0.0, is_match=False)
+
+                    if match_result.is_match:
+                        frame_recognized_count += 1
+                    else:
+                        frame_unknown_count += 1
+
+                total_recognized_faces += frame_recognized_count
+                total_unknown_faces += frame_unknown_count
 
                 t1 = time.time()
 
@@ -431,7 +496,6 @@ def main():
                 total_detections += len(latest_detections)
                 total_faces_detected += len(latest_faces)
                 total_faces_associated += len(latest_associations)
-                total_embeddings_generated += len(latest_embeddings_map)
 
                 for trk in latest_tracks:
                     observed_unique_track_ids.add(trk.track_id)
@@ -450,7 +514,7 @@ def main():
                 latest_tracks,
                 latest_faces,
                 latest_associations,
-                latest_embeddings_map,
+                track_identity_cache,
             )
 
             # Draw HUD
@@ -464,7 +528,10 @@ def main():
                 detection_count=len(latest_detections),
                 faces_detected_count=len(latest_faces),
                 faces_associated_count=len(latest_associations),
-                embeddings_generated_count=len(latest_embeddings_map),
+                embeddings_generated_count=total_embeddings_generated,
+                recognized_faces_count=total_recognized_faces,
+                unknown_faces_count=total_unknown_faces,
+                recog_threshold=args.face_threshold,
             )
 
             # Display frame
@@ -489,7 +556,7 @@ def main():
         else 0.0
     )
     print("==================================================")
-    print("VISION — Slice 4 Summary")
+    print("VISION — Slice 5 Summary")
     print("==================================================")
     print(f"Frames Processed       : {frame_index}")
     print(f"YOLO Inferences        : {inference_count}")
@@ -499,7 +566,9 @@ def main():
     print(f"Faces Detected         : {total_faces_detected}")
     print(f"Faces Associated       : {total_faces_associated}")
     print(f"Embeddings Generated   : {total_embeddings_generated}")
-    print(f"Embedding Dimension    : {FaceEmbedder.TARGET_DIMENSION}")
+    print(f"Recognized Faces       : {total_recognized_faces}")
+    print(f"Unknown Faces          : {total_unknown_faces}")
+    print(f"Recognition Threshold  : {args.face_threshold:.2f}")
     print(f"Average Inference FPS  : {avg_inf_fps:.2f}")
     print("==================================================")
 
