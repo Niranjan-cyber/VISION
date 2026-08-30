@@ -1,0 +1,41 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyTorch / Caches
+.cache/
+*.pth
+*.pt
+*.onnx
+*.engine
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Large Video Files (exceeds GitHub 100MB limit)
+videos/*
+!videos/.gitkeep
+
+# Output folders
+frames/*
+!frames/.gitkeep
+enhanced_videos/*
+!enhanced_videos/.gitkeep
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# IDE / Editor configs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing / Pytest
+.pytest_cache/
+.coverage
+htmlcov/
