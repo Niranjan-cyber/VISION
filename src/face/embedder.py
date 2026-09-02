@@ -239,5 +239,7 @@ class ONNXRuntimeArcFaceEmbedder:
         return FaceEmbedding(vector=np.copy(norm_vec), dimension=self.TARGET_DIMENSION)
 
 
-# Default FaceEmbedder alias points to the production ONNXRuntime backend
-FaceEmbedder = ONNXRuntimeArcFaceEmbedder
+from src.face.modern_embedder import W600KR50Embedder
+
+# Default FaceEmbedder alias points to modern InsightFace W600K-R50 backend
+FaceEmbedder = W600KR50Embedder

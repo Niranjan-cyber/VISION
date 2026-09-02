@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 
 from src.core.types import BoundingBox, FaceEmbedding
+from src.face.alignment import align_face
 from src.face.preprocessing import l2_normalize
 
 SUPPORTED_IMAGE_EXTENSIONS: Set[str] = {
@@ -162,22 +163,32 @@ def load_gallery_from_dir(
                 continue
 
             best_face = max(faces, key=lambda f: f.confidence)
-            fb = best_face.bbox
-            fh, fw = img.shape[:2]
+            
+            # Apply 5-point facial landmark alignment if landmarks are available
+            aligned_face = None
+            if best_face.landmarks is not None:
+                aligned_face = align_face(img, best_face.landmarks)
 
-            fx1 = max(0, min(fb.x1, fw))
-            fy1 = max(0, min(fb.y1, fh))
-            fx2 = max(0, min(fb.x2, fw))
-            fy2 = max(0, min(fb.y2, fh))
+            if aligned_face is not None:
+                face_crop = aligned_face
+            else:
+                fb = best_face.bbox
+                fh, fw = img.shape[:2]
 
-            if fx2 <= fx1 or fy2 <= fy1:
-                print(
-                    f"[WARNING] Invalid face box in gallery image '{filename}'. Skipping.",
-                    file=sys.stderr,
-                )
-                continue
+                fx1 = max(0, min(fb.x1, fw))
+                fy1 = max(0, min(fb.y1, fh))
+                fx2 = max(0, min(fb.x2, fw))
+                fy2 = max(0, min(fb.y2, fh))
 
-            face_crop = img[fy1:fy2, fx1:fx2]
+                if fx2 <= fx1 or fy2 <= fy1:
+                    print(
+                        f"[WARNING] Invalid face box in gallery image '{filename}'. Skipping.",
+                        file=sys.stderr,
+                    )
+                    continue
+
+                face_crop = img[fy1:fy2, fx1:fx2]
+
             embedding = face_embedder.embed(face_crop)
 
             if embedding is not None:

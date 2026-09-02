@@ -15,6 +15,7 @@ from src.core.types import (
     Track,
 )
 from src.detection.detector import YOLODetector
+from src.face.alignment import align_face
 from src.face.association import FaceTrackAssociation, associate_faces_to_tracks
 from src.face.detector import FaceDetector
 from src.face.embedder import (
@@ -24,6 +25,7 @@ from src.face.embedder import (
 )
 from src.face.gallery import load_gallery_from_dir
 from src.face.matcher import FaceMatcher
+from src.face.modern_embedder import W600KR50Embedder
 from src.ingestion.video import VideoSource
 from src.tracking.tracker import ByteTrackTracker
 
@@ -48,7 +50,7 @@ def draw_annotations(
     associations: List[FaceTrackAssociation],
     track_identity_map: Dict[int, IdentityMatch],
 ) -> np.ndarray:
-    """Renders tracked object bounding boxes, face boxes, and identity match status indicators."""
+    """Renders tracked object bounding boxes, face boxes, landmarks, and identity match status indicators."""
     annotated = frame.copy()
     h, w = annotated.shape[:2]
 
@@ -95,7 +97,7 @@ def draw_annotations(
             lineType=cv2.LINE_AA,
         )
 
-    # 2. Render Face Boxes & Identity Match Labels
+    # 2. Render Face Boxes, Landmarks & Identity Match Labels
     for face in faces:
         bbox = face.bbox
         fx1 = max(0, min(bbox.x1, w - 1))
@@ -121,6 +123,13 @@ def draw_annotations(
             face_label = f"face {face.confidence:.2f}"
 
         cv2.rectangle(annotated, (fx1, fy1), (fx2, fy2), box_color, thickness=2)
+
+        # Draw 5 facial landmarks if available
+        if face.landmarks is not None:
+            for pt in face.landmarks:
+                lx, ly = int(round(pt[0])), int(round(pt[1]))
+                if 0 <= lx < w and 0 <= ly < h:
+                    cv2.circle(annotated, (lx, ly), 2, (0, 255, 255), -1)
 
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 0.42
@@ -162,14 +171,14 @@ def draw_hud(
     unknown_faces_count: int,
     recog_threshold: float,
     recog_margin: float,
-    arcface_backend: str,
+    face_model_name: str,
 ) -> np.ndarray:
     """Draws runtime status HUD on top-left of frame."""
     hud_frame = frame.copy()
     overlay = hud_frame.copy()
 
     panel_x1, panel_y1 = 15, 15
-    panel_x2, panel_y2 = 295, 315
+    panel_x2, panel_y2 = 300, 345
 
     # Glassmorphic dark panel background
     cv2.rectangle(
@@ -190,7 +199,7 @@ def draw_hud(
     )
 
     lines = [
-        ("VISION - Slice 5 (Face Recog)", (0, 215, 255), 0.48, 2),
+        ("VISION - Slice 5.6 (Face Recog)", (0, 215, 255), 0.48, 2),
         (
             f"Frame: {current_frame} / {total_frames if total_frames > 0 else 'N/A'}",
             (220, 220, 220),
@@ -211,9 +220,10 @@ def draw_hud(
         (f"Embeddings Gen: {embeddings_generated_count}", (200, 200, 200), 0.42, 1),
         (f"Recognized Faces: {recognized_faces_count}", (0, 255, 127), 0.42, 1),
         (f"Unknown Faces: {unknown_faces_count}", (255, 0, 255), 0.42, 1),
-        (f"Recog Threshold: {recog_threshold:.2f}", (200, 200, 200), 0.40, 1),
-        (f"Recog Margin: {recog_margin:.2f}", (200, 200, 200), 0.40, 1),
-        (f"ArcFace Backend: {arcface_backend}", (0, 215, 255), 0.40, 1),
+        (f"Model: {face_model_name}", (0, 215, 255), 0.40, 1),
+        ("Alignment: 5-Point Similarity", (0, 255, 255), 0.40, 1),
+        ("Embedding: 512-D L2 Norm", (200, 200, 200), 0.40, 1),
+        (f"Threshold: {recog_threshold:.2f} | Margin: {recog_margin:.2f}", (200, 200, 200), 0.40, 1),
     ]
 
     y_offset = panel_y1 + 18
@@ -235,7 +245,7 @@ def draw_hud(
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="VISION Vertical Slice 5 - Face Recognition & Identity Matching Pipeline"
+        description="VISION Vertical Slice 5.6 - Face Recognition & Identity Matching Pipeline"
     )
     parser.add_argument(
         "--video",
@@ -286,11 +296,18 @@ def parse_args():
         help="YOLO model path/name (default: yolo11n.pt)",
     )
     parser.add_argument(
+        "--face-model",
+        type=str,
+        choices=["w600k_r50", "r100"],
+        default="w600k_r50",
+        help="Recognition model architecture (default: w600k_r50)",
+    )
+    parser.add_argument(
         "--arcface-backend",
         type=str,
         choices=["onnxruntime", "opencv"],
         default="onnxruntime",
-        help="Inference backend for ArcFace embedder (default: onnxruntime)",
+        help="Inference backend for legacy ArcFace R100 model (default: onnxruntime)",
     )
     parser.add_argument(
         "--debug-face-matching",
@@ -298,9 +315,14 @@ def parse_args():
         help="Print diagnostic log of candidate similarity scores for newly evaluated track embeddings",
     )
     parser.add_argument(
+        "--debug-face-alignment",
+        action="store_true",
+        help="Save aligned face crop images to data/debug/aligned_faces/ for visual verification",
+    )
+    parser.add_argument(
         "--debug-face-crops",
         action="store_true",
-        help="Save extracted face crop images to scratch/debug_face_crops/ for visual inspection",
+        help="Save raw extracted face crop images to scratch/debug_face_crops/ for visual inspection",
     )
     return parser.parse_args()
 
@@ -308,24 +330,31 @@ def parse_args():
 def main():
     args = parse_args()
 
+    model_display_name = "InsightFace W600K-R50" if args.face_model == "w600k_r50" else f"ArcFace R100 ({args.arcface_backend})"
+
     print("==================================================")
-    print("       VISION — Vertical Slice 5 Pipeline        ")
+    print("       VISION — Vertical Slice 5.6 Pipeline       ")
     print("==================================================")
     print(f" Video Path          : {args.video}")
     print(f" YOLO Model          : {args.model}")
+    print(f" Recognition Model   : {model_display_name}")
+    print(f" Embedding Dim       : 512-D L2-Normalized")
+    print(f" Alignment           : 5-Point Landmark Similarity Transform")
+    print(f" Preprocessing       : 112x112 BGR / 127.5 Normalization")
     print(f" Confidence Threshold: {args.confidence}")
     print(f" Face Confidence     : {args.face_confidence}")
     print(f" Recognition Thresh  : {args.face_threshold:.2f}")
     print(f" Recognition Margin  : {args.face_margin:.2f}")
-    print(f" ArcFace Backend     : {args.arcface_backend}")
     print(f" Gallery Directory   : {args.gallery_dir}")
     print(f" Debug Matching      : {args.debug_face_matching}")
-    print(f" Debug Face Crops    : {args.debug_face_crops}")
+    print(f" Debug Alignment     : {args.debug_face_alignment}")
     print(f" Inference Interval  : Every {args.interval} frame(s)")
     print("==================================================")
 
     if args.debug_face_crops:
         os.makedirs("scratch/debug_face_crops", exist_ok=True)
+    if args.debug_face_alignment:
+        os.makedirs("data/debug/aligned_faces", exist_ok=True)
 
     # 1. Ingestion Initialization
     try:
@@ -376,14 +405,17 @@ def main():
         source.release()
         sys.exit(1)
 
-    # 5. FaceEmbedder Initialization based on --arcface-backend
+    # 5. FaceEmbedder Initialization based on --face-model
     try:
-        if args.arcface_backend == "opencv":
-            face_embedder = OpenCVArcFaceEmbedder()
+        if args.face_model == "w600k_r50":
+            face_embedder = W600KR50Embedder(model_path="models/w600k_r50.onnx")
         else:
-            face_embedder = ONNXRuntimeArcFaceEmbedder()
+            if args.arcface_backend == "opencv":
+                face_embedder = OpenCVArcFaceEmbedder()
+            else:
+                face_embedder = ONNXRuntimeArcFaceEmbedder()
     except Exception as e:
-        print(f"[ERROR] FaceEmbedder ({args.arcface_backend}) initialization failed: {e}", file=sys.stderr)
+        print(f"[ERROR] FaceEmbedder initialization failed: {e}", file=sys.stderr)
         source.release()
         sys.exit(1)
 
@@ -400,7 +432,7 @@ def main():
         source.release()
         sys.exit(1)
 
-    window_name = "VISION - Vertical Slice 5 (Face Recognition)"
+    window_name = "VISION - Vertical Slice 5.6 (Face Recognition)"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
     latest_detections: List[Detection] = []
@@ -410,6 +442,7 @@ def main():
 
     # Track-level identity cache: track_id -> IdentityMatch
     track_identity_cache: Dict[int, IdentityMatch] = {}
+    aligned_debug_saved_count = 0
 
     frame_index = 0
     inference_count = 0
@@ -476,10 +509,17 @@ def main():
                         if gx2 <= gx1 or gy2 <= gy1:
                             continue
 
+                        # Convert crop-relative landmarks to global frame coordinates
+                        global_landmarks = None
+                        if crop_face.landmarks is not None:
+                            global_landmarks = crop_face.landmarks.copy()
+                            global_landmarks[:, 0] += px1
+                            global_landmarks[:, 1] += py1
+
                         global_face = FaceDetection(
                             bbox=BoundingBox(x1=gx1, y1=gy1, x2=gx2, y2=gy2),
                             confidence=crop_face.confidence,
-                            landmarks=crop_face.landmarks,
+                            landmarks=global_landmarks,
                         )
                         current_frame_faces.append(global_face)
 
@@ -499,25 +539,39 @@ def main():
                     if track_id in track_identity_cache:
                         match_result = track_identity_cache[track_id]
                     else:
-                        fb = assoc.face.bbox
-                        fx1 = max(0, min(fb.x1, frame_w))
-                        fy1 = max(0, min(fb.y1, frame_h))
-                        fx2 = max(0, min(fb.x2, frame_w))
-                        fy2 = max(0, min(fb.y2, frame_h))
+                        # 1. Attempt 5-point landmark similarity warp alignment
+                        aligned_crop = None
+                        if assoc.face.landmarks is not None:
+                            aligned_crop = align_face(frame, assoc.face.landmarks)
 
-                        if fx2 <= fx1 or fy2 <= fy1:
+                        if aligned_crop is not None:
+                            face_input = aligned_crop
+                        else:
+                            fb = assoc.face.bbox
+                            fx1 = max(0, min(fb.x1, frame_w))
+                            fy1 = max(0, min(fb.y1, frame_h))
+                            fx2 = max(0, min(fb.x2, frame_w))
+                            fy2 = max(0, min(fb.y2, frame_h))
+
+                            if fx2 <= fx1 or fy2 <= fy1:
+                                continue
+
+                            face_input = frame[fy1:fy2, fx1:fx2]
+
+                        if face_input.size == 0:
                             continue
 
-                        face_crop = frame[fy1:fy2, fx1:fx2]
-                        if face_crop.size == 0:
-                            continue
+                        if args.debug_face_alignment and aligned_debug_saved_count < 5:
+                            aligned_save_path = f"data/debug/aligned_faces/track_{track_id}_frame_{frame_index}.jpg"
+                            cv2.imwrite(aligned_save_path, face_input)
+                            aligned_debug_saved_count += 1
+                            print(f"[DEBUG] Saved aligned face ({face_input.shape[1]}x{face_input.shape[0]}) to '{aligned_save_path}'")
 
                         if args.debug_face_crops:
                             crop_save_path = f"scratch/debug_face_crops/track_{track_id}_frame_{frame_index}.jpg"
-                            cv2.imwrite(crop_save_path, face_crop)
-                            print(f"[DEBUG] Saved face crop ({face_crop.shape[1]}x{face_crop.shape[0]}) to '{crop_save_path}'")
+                            cv2.imwrite(crop_save_path, face_input)
 
-                        embedding = face_embedder.embed(face_crop)
+                        embedding = face_embedder.embed(face_input)
                         if embedding is not None:
                             total_embeddings_generated += 1
                             match_result = face_matcher.match(embedding)
@@ -592,7 +646,7 @@ def main():
                 unknown_faces_count=total_unknown_faces,
                 recog_threshold=args.face_threshold,
                 recog_margin=args.face_margin,
-                arcface_backend=args.arcface_backend,
+                face_model_name=model_display_name,
             )
 
             # Display frame
@@ -617,7 +671,7 @@ def main():
         else 0.0
     )
     print("==================================================")
-    print("VISION — Slice 5 Summary")
+    print("VISION — Slice 5.6 Summary")
     print("==================================================")
     print(f"Frames Processed       : {frame_index}")
     print(f"YOLO Inferences        : {inference_count}")
@@ -629,9 +683,10 @@ def main():
     print(f"Embeddings Generated   : {total_embeddings_generated}")
     print(f"Recognized Faces       : {total_recognized_faces}")
     print(f"Unknown Faces          : {total_unknown_faces}")
+    print(f"Recognition Model      : {model_display_name}")
+    print(f"Alignment              : 5-Point Landmark Similarity Transform")
     print(f"Recognition Threshold  : {args.face_threshold:.2f}")
     print(f"Recognition Margin     : {args.face_margin:.2f}")
-    print(f"ArcFace Backend        : {args.arcface_backend}")
     print(f"Average Inference FPS  : {avg_inf_fps:.2f}")
     print("==================================================")
 
