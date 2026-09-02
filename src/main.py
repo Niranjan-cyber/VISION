@@ -17,7 +17,11 @@ from src.core.types import (
 from src.detection.detector import YOLODetector
 from src.face.association import FaceTrackAssociation, associate_faces_to_tracks
 from src.face.detector import FaceDetector
-from src.face.embedder import FaceEmbedder
+from src.face.embedder import (
+    FaceEmbedder,
+    ONNXRuntimeArcFaceEmbedder,
+    OpenCVArcFaceEmbedder,
+)
 from src.face.gallery import load_gallery_from_dir
 from src.face.matcher import FaceMatcher
 from src.ingestion.video import VideoSource
@@ -158,13 +162,14 @@ def draw_hud(
     unknown_faces_count: int,
     recog_threshold: float,
     recog_margin: float,
+    arcface_backend: str,
 ) -> np.ndarray:
     """Draws runtime status HUD on top-left of frame."""
     hud_frame = frame.copy()
     overlay = hud_frame.copy()
 
     panel_x1, panel_y1 = 15, 15
-    panel_x2, panel_y2 = 295, 295
+    panel_x2, panel_y2 = 295, 315
 
     # Glassmorphic dark panel background
     cv2.rectangle(
@@ -208,6 +213,7 @@ def draw_hud(
         (f"Unknown Faces: {unknown_faces_count}", (255, 0, 255), 0.42, 1),
         (f"Recog Threshold: {recog_threshold:.2f}", (200, 200, 200), 0.40, 1),
         (f"Recog Margin: {recog_margin:.2f}", (200, 200, 200), 0.40, 1),
+        (f"ArcFace Backend: {arcface_backend}", (0, 215, 255), 0.40, 1),
     ]
 
     y_offset = panel_y1 + 18
@@ -222,7 +228,7 @@ def draw_hud(
             thickness,
             lineType=cv2.LINE_AA,
         )
-        y_offset += 21
+        y_offset += 20
 
     return hud_frame
 
@@ -280,6 +286,13 @@ def parse_args():
         help="YOLO model path/name (default: yolo11n.pt)",
     )
     parser.add_argument(
+        "--arcface-backend",
+        type=str,
+        choices=["onnxruntime", "opencv"],
+        default="onnxruntime",
+        help="Inference backend for ArcFace embedder (default: onnxruntime)",
+    )
+    parser.add_argument(
         "--debug-face-matching",
         action="store_true",
         help="Print diagnostic log of candidate similarity scores for newly evaluated track embeddings",
@@ -304,6 +317,7 @@ def main():
     print(f" Face Confidence     : {args.face_confidence}")
     print(f" Recognition Thresh  : {args.face_threshold:.2f}")
     print(f" Recognition Margin  : {args.face_margin:.2f}")
+    print(f" ArcFace Backend     : {args.arcface_backend}")
     print(f" Gallery Directory   : {args.gallery_dir}")
     print(f" Debug Matching      : {args.debug_face_matching}")
     print(f" Debug Face Crops    : {args.debug_face_crops}")
@@ -362,11 +376,14 @@ def main():
         source.release()
         sys.exit(1)
 
-    # 5. FaceEmbedder Initialization
+    # 5. FaceEmbedder Initialization based on --arcface-backend
     try:
-        face_embedder = FaceEmbedder()
+        if args.arcface_backend == "opencv":
+            face_embedder = OpenCVArcFaceEmbedder()
+        else:
+            face_embedder = ONNXRuntimeArcFaceEmbedder()
     except Exception as e:
-        print(f"[ERROR] FaceEmbedder initialization failed: {e}", file=sys.stderr)
+        print(f"[ERROR] FaceEmbedder ({args.arcface_backend}) initialization failed: {e}", file=sys.stderr)
         source.release()
         sys.exit(1)
 
@@ -462,6 +479,7 @@ def main():
                         global_face = FaceDetection(
                             bbox=BoundingBox(x1=gx1, y1=gy1, x2=gx2, y2=gy2),
                             confidence=crop_face.confidence,
+                            landmarks=crop_face.landmarks,
                         )
                         current_frame_faces.append(global_face)
 
@@ -574,6 +592,7 @@ def main():
                 unknown_faces_count=total_unknown_faces,
                 recog_threshold=args.face_threshold,
                 recog_margin=args.face_margin,
+                arcface_backend=args.arcface_backend,
             )
 
             # Display frame
@@ -612,6 +631,7 @@ def main():
     print(f"Unknown Faces          : {total_unknown_faces}")
     print(f"Recognition Threshold  : {args.face_threshold:.2f}")
     print(f"Recognition Margin     : {args.face_margin:.2f}")
+    print(f"ArcFace Backend        : {args.arcface_backend}")
     print(f"Average Inference FPS  : {avg_inf_fps:.2f}")
     print("==================================================")
 
