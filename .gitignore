@@ -84,3 +84,5 @@ models/*
 *.log
 tmp/
 temp/
+scratch/
+data/debug/
