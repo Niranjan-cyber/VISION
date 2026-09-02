@@ -57,9 +57,13 @@ class FaceEmbedder:
     def embed(self, face_crop: np.ndarray) -> Optional[FaceEmbedding]:
         """
         Extracts a 512-dimensional L2-normalized face feature embedding from a BGR face crop.
-        Returns None if face_crop is invalid or empty.
+        Returns None if face_crop is invalid, empty, or contains NaNs/Infs.
+        Guarantees that each returned FaceEmbedding holds a distinct, independent NumPy vector.
         """
-        if self.net is None or face_crop is None or face_crop.size == 0:
+        if self.net is None or face_crop is None or not isinstance(face_crop, np.ndarray) or face_crop.size == 0:
+            return None
+
+        if np.isnan(face_crop).any() or np.isinf(face_crop).any():
             return None
 
         blob = preprocess_face_crop(face_crop)
@@ -86,6 +90,11 @@ class FaceEmbedder:
                 f"Model produced {len(raw_vec)}-d embedding, expected {self.TARGET_DIMENSION}-d"
             )
 
+        if np.isnan(raw_vec).any() or np.isinf(raw_vec).any():
+            print("[WARNING] ArcFace raw vector contains NaNs or Infs. Rejecting crop.", file=sys.stderr)
+            return None
+
         norm_vec = l2_normalize(raw_vec)
 
-        return FaceEmbedding(vector=norm_vec, dimension=self.TARGET_DIMENSION)
+        # Return a fresh, independent FaceEmbedding dataclass instance
+        return FaceEmbedding(vector=np.copy(norm_vec), dimension=self.TARGET_DIMENSION)

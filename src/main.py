@@ -157,13 +157,14 @@ def draw_hud(
     recognized_faces_count: int,
     unknown_faces_count: int,
     recog_threshold: float,
+    recog_margin: float,
 ) -> np.ndarray:
     """Draws runtime status HUD on top-left of frame."""
     hud_frame = frame.copy()
     overlay = hud_frame.copy()
 
     panel_x1, panel_y1 = 15, 15
-    panel_x2, panel_y2 = 295, 275
+    panel_x2, panel_y2 = 295, 295
 
     # Glassmorphic dark panel background
     cv2.rectangle(
@@ -206,6 +207,7 @@ def draw_hud(
         (f"Recognized Faces: {recognized_faces_count}", (0, 255, 127), 0.42, 1),
         (f"Unknown Faces: {unknown_faces_count}", (255, 0, 255), 0.42, 1),
         (f"Recog Threshold: {recog_threshold:.2f}", (200, 200, 200), 0.40, 1),
+        (f"Recog Margin: {recog_margin:.2f}", (200, 200, 200), 0.40, 1),
     ]
 
     y_offset = panel_y1 + 18
@@ -254,6 +256,12 @@ def parse_args():
         help="Cosine similarity threshold for Face Recognition (default: 0.60)",
     )
     parser.add_argument(
+        "--face-margin",
+        type=float,
+        default=0.10,
+        help="Minimum similarity margin between best and second-best candidate (default: 0.10)",
+    )
+    parser.add_argument(
         "--gallery-dir",
         type=str,
         default="data/face_gallery",
@@ -271,6 +279,16 @@ def parse_args():
         default="yolo11n.pt",
         help="YOLO model path/name (default: yolo11n.pt)",
     )
+    parser.add_argument(
+        "--debug-face-matching",
+        action="store_true",
+        help="Print diagnostic log of candidate similarity scores for newly evaluated track embeddings",
+    )
+    parser.add_argument(
+        "--debug-face-crops",
+        action="store_true",
+        help="Save extracted face crop images to scratch/debug_face_crops/ for visual inspection",
+    )
     return parser.parse_args()
 
 
@@ -284,10 +302,16 @@ def main():
     print(f" YOLO Model          : {args.model}")
     print(f" Confidence Threshold: {args.confidence}")
     print(f" Face Confidence     : {args.face_confidence}")
-    print(f" Recognition Thresh  : {args.face_threshold}")
+    print(f" Recognition Thresh  : {args.face_threshold:.2f}")
+    print(f" Recognition Margin  : {args.face_margin:.2f}")
     print(f" Gallery Directory   : {args.gallery_dir}")
+    print(f" Debug Matching      : {args.debug_face_matching}")
+    print(f" Debug Face Crops    : {args.debug_face_crops}")
     print(f" Inference Interval  : Every {args.interval} frame(s)")
     print("==================================================")
+
+    if args.debug_face_crops:
+        os.makedirs("scratch/debug_face_crops", exist_ok=True)
 
     # 1. Ingestion Initialization
     try:
@@ -351,7 +375,9 @@ def main():
         gallery = load_gallery_from_dir(
             args.gallery_dir, face_detector, face_embedder
         )
-        face_matcher = FaceMatcher(gallery, threshold=args.face_threshold)
+        face_matcher = FaceMatcher(
+            gallery, threshold=args.face_threshold, margin=args.face_margin
+        )
     except Exception as e:
         print(f"[ERROR] Face Gallery/Matcher initialization failed: {e}", file=sys.stderr)
         source.release()
@@ -468,11 +494,26 @@ def main():
                         if face_crop.size == 0:
                             continue
 
+                        if args.debug_face_crops:
+                            crop_save_path = f"scratch/debug_face_crops/track_{track_id}_frame_{frame_index}.jpg"
+                            cv2.imwrite(crop_save_path, face_crop)
+                            print(f"[DEBUG] Saved face crop ({face_crop.shape[1]}x{face_crop.shape[0]}) to '{crop_save_path}'")
+
                         embedding = face_embedder.embed(face_crop)
                         if embedding is not None:
                             total_embeddings_generated += 1
                             match_result = face_matcher.match(embedding)
                             track_identity_cache[track_id] = match_result
+
+                            if args.debug_face_matching:
+                                all_sims = face_matcher.get_all_similarities(embedding)
+                                print(f"\n--- Diagnostic Matching for Track #{track_id} (Frame {frame_index}) ---")
+                                for id_name, id_score in sorted(all_sims.items(), key=lambda x: x[1], reverse=True):
+                                    print(f"  {id_name}: {id_score:.4f}")
+                                print(f"  Best       : {match_result.identity if match_result.is_match else 'None'} ({match_result.similarity:.4f})")
+                                print(f"  Second-Best: {match_result.second_similarity:.4f}")
+                                print(f"  Margin     : {match_result.margin:.4f} (Required: >= {args.face_margin:.2f})")
+                                print(f"  Match Result: {'MATCH' if match_result.is_match else 'UNKNOWN'}")
                         else:
                             match_result = IdentityMatch(identity=None, similarity=0.0, is_match=False)
 
@@ -532,6 +573,7 @@ def main():
                 recognized_faces_count=total_recognized_faces,
                 unknown_faces_count=total_unknown_faces,
                 recog_threshold=args.face_threshold,
+                recog_margin=args.face_margin,
             )
 
             # Display frame
@@ -569,6 +611,7 @@ def main():
     print(f"Recognized Faces       : {total_recognized_faces}")
     print(f"Unknown Faces          : {total_unknown_faces}")
     print(f"Recognition Threshold  : {args.face_threshold:.2f}")
+    print(f"Recognition Margin     : {args.face_margin:.2f}")
     print(f"Average Inference FPS  : {avg_inf_fps:.2f}")
     print("==================================================")
 

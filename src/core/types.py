@@ -76,8 +76,10 @@ class FaceEmbedding:
 
 @dataclass
 class IdentityMatch:
-    """Represents the result of matching a face embedding against the face gallery."""
+    """Represents the result of comparing a face embedding against the face gallery."""
 
     identity: Optional[str]
     similarity: float
     is_match: bool
+    second_similarity: float = 0.0
+    margin: float = 0.0
