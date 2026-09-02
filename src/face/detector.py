@@ -42,7 +42,6 @@ class FaceDetector:
                 raise RuntimeError(f"Unable to download face model from {YUNET_MODEL_URL}") from e
 
         try:
-            # Initialize OpenCV FaceDetectorYN
             self.detector = cv2.FaceDetectorYN.create(
                 self.model_path,
                 "",
@@ -58,7 +57,7 @@ class FaceDetector:
     def detect(self, crop: np.ndarray) -> List[FaceDetection]:
         """
         Detects faces in the given image or person crop.
-        Returns crop-relative FaceDetection objects.
+        Returns crop-relative FaceDetection objects containing bounding boxes and 5 2D landmarks.
         """
         if self.detector is None or crop is None or crop.size == 0:
             return []
@@ -79,7 +78,14 @@ class FaceDetector:
 
         face_detections: List[FaceDetection] = []
         for face in faces:
-            # YuNet output: [x, y, w, h, x_re, y_re, x_le, y_le, x_n, y_n, x_rm, y_rm, x_lm, y_lm, score]
+            # YuNet output layout:
+            # face[0:4]:  [x, y, w, h]
+            # face[4:6]:  right_eye (x, y)
+            # face[6:8]:  left_eye (x, y)
+            # face[8:10]: nose_tip (x, y)
+            # face[10:12]: right_mouth (x, y)
+            # face[12:14]: left_mouth (x, y)
+            # face[14]:   score
             fx, fy, fw, fh = float(face[0]), float(face[1]), float(face[2]), float(face[3])
             score = float(face[14])
 
@@ -92,6 +98,14 @@ class FaceDetector:
                 continue
 
             bbox = BoundingBox(x1=x1, y1=y1, x2=x2, y2=y2)
-            face_detections.append(FaceDetection(bbox=bbox, confidence=score))
+            landmarks = np.array([
+                [face[4], face[5]],    # right eye
+                [face[6], face[7]],    # left eye
+                [face[8], face[9]],    # nose
+                [face[10], face[11]],  # right mouth
+                [face[12], face[13]],  # left mouth
+            ], dtype=np.float32)
+
+            face_detections.append(FaceDetection(bbox=bbox, confidence=score, landmarks=landmarks))
 
         return face_detections

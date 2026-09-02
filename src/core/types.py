@@ -60,10 +60,11 @@ class Track:
 
 @dataclass
 class FaceDetection:
-    """Represents a detected face location and confidence in VISION."""
+    """Represents a detected face location, confidence, and optional 5 2D facial landmarks."""
 
     bbox: BoundingBox
     confidence: float
+    landmarks: Optional[np.ndarray] = None
 
 
 @dataclass
