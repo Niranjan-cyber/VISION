@@ -1,0 +1,25 @@
+# VISION Surveillance Zone Configurations
+# Supported zone types: restricted, warning, monitored
+
+zones:
+  - id: restricted_zone_1
+    name: Border Restricted Area
+    type: restricted
+    polygon:
+      - [100, 100]
+      - [500, 100]
+      - [500, 450]
+      - [100, 450]
+    metadata:
+      description: "Primary perimeter virtual fence for unauthorized intrusion detection"
+
+  - id: warning_zone_checkpoint
+    name: Vehicle Checkpoint Area
+    type: warning
+    polygon:
+      - [50, 480]
+      - [450, 480]
+      - [450, 800]
+      - [50, 800]
+    metadata:
+      description: "Access road checkpoint monitored for stationary vehicles and dwell time"

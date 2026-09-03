@@ -3,6 +3,10 @@ import os
 import sys
 import time
 from typing import Dict, List, Optional, Set, Tuple
+
+# Ensure project root is in sys.path when running main.py directly
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 import cv2
 import numpy as np
 
@@ -27,6 +31,17 @@ from src.anpr import (
     map_crop_to_global_bbox,
 )
 from src.detection.detector import YOLODetector
+from src.events import (
+    Alert,
+    EventEngine,
+    EventType,
+    ObjectState,
+    SecurityEvent,
+    Severity,
+    Zone,
+    load_zones_from_file,
+    point_in_zone,
+)
 from src.face.alignment import align_face
 from src.face.association import FaceTrackAssociation, associate_faces_to_tracks
 from src.face.detector import FaceDetector
@@ -68,10 +83,45 @@ def draw_annotations(
     track_identity_map: Dict[int, IdentityMatch],
     plates: Optional[List[PlateRecognitionResult]] = None,
     track_plate_map: Optional[Dict[int, PlateRecognitionResult]] = None,
+    zones: Optional[List[Zone]] = None,
+    breached_zone_ids: Optional[Set[str]] = None,
 ) -> np.ndarray:
-    """Renders tracked object bounding boxes, face boxes, landmarks, vehicle plates, and status indicators."""
+    """Renders surveillance zones, tracked bounding boxes, face boxes, landmarks, vehicle plates, and status indicators."""
     annotated = frame.copy()
     h, w = annotated.shape[:2]
+
+    # 0. Render Surveillance Zones (Polygons, Semi-transparent Fill, and Labels)
+    if zones:
+        for zone in zones:
+            if len(zone.polygon) < 3:
+                continue
+            is_breached = (breached_zone_ids is not None and zone.id in breached_zone_ids)
+            zone_color = (0, 0, 255) if is_breached else ((0, 200, 0) if zone.zone_type == "restricted" else (0, 215, 255))
+
+            # Semi-transparent overlay fill
+            pts = np.array(zone.polygon, dtype=np.int32)
+            poly_overlay = annotated.copy()
+            cv2.fillPoly(poly_overlay, [pts], zone_color)
+            alpha = 0.35 if is_breached else 0.18
+            cv2.addWeighted(poly_overlay, alpha, annotated, 1.0 - alpha, 0, annotated)
+
+            # Border line
+            cv2.polylines(annotated, [pts], isClosed=True, color=zone_color, thickness=2)
+
+            # Label at first vertex
+            lx, ly = zone.polygon[0]
+            status_tag = " [BREACHED]" if is_breached else f" [{zone.zone_type.upper()}]"
+            zone_lbl = f"{zone.name}{status_tag}"
+            cv2.putText(
+                annotated,
+                zone_lbl,
+                (lx + 6, max(18, ly - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.42,
+                zone_color,
+                1,
+                lineType=cv2.LINE_AA,
+            )
 
     # Map face object ID -> associated track_id
     associated_map: Dict[int, int] = {
@@ -235,13 +285,15 @@ def draw_hud(
     face_model_name: str,
     vehicles_tracked_count: int = 0,
     plates_read_count: int = 0,
+    active_events_count: int = 0,
+    latest_alert_title: Optional[str] = None,
 ) -> np.ndarray:
     """Draws runtime status HUD on top-left of frame."""
     hud_frame = frame.copy()
     overlay = hud_frame.copy()
 
     panel_x1, panel_y1 = 15, 15
-    panel_x2, panel_y2 = 300, 395
+    panel_x2, panel_y2 = 320, 440
 
     # Glassmorphic dark panel background
     cv2.rectangle(
@@ -253,16 +305,17 @@ def draw_hud(
     )
     alpha = 0.75
     cv2.addWeighted(overlay, alpha, hud_frame, 1 - alpha, 0, hud_frame)
+    border_color = (0, 0, 255) if active_events_count > 0 else (0, 215, 255)
     cv2.rectangle(
         hud_frame,
         (panel_x1, panel_y1),
         (panel_x2, panel_y2),
-        (0, 215, 255),
-        1,
+        border_color,
+        2 if active_events_count > 0 else 1,
     )
 
     lines = [
-        ("VISION - Slice 6.0 (Face + ANPR)", (0, 215, 255), 0.48, 2),
+        ("VISION - Slice 7.0 (Events & Alerts)", (0, 215, 255), 0.48, 2),
         (
             f"Frame: {current_frame} / {total_frames if total_frames > 0 else 'N/A'}",
             (220, 220, 220),
@@ -285,11 +338,20 @@ def draw_hud(
         (f"Flagged Tracks: {flagged_tracks_count}", (0, 0, 255), 0.42, 1),
         (f"Vehicles: {vehicles_tracked_count}", (255, 144, 30), 0.42, 1),
         (f"Plates Read: {plates_read_count}", (0, 215, 255), 0.42, 1),
+        (
+            f"Active Events: {active_events_count}",
+            (0, 0, 255) if active_events_count > 0 else (0, 255, 127),
+            0.44,
+            2 if active_events_count > 0 else 1,
+        ),
         (f"Face Model: {face_model_name}", (0, 215, 255), 0.40, 1),
         ("Alignment: 5-Point Similarity", (0, 255, 255), 0.40, 1),
         ("Embedding: 512-D L2 Norm", (200, 200, 200), 0.40, 1),
         (f"Threshold: {recog_threshold:.2f} | Margin: {recog_margin:.2f}", (200, 200, 200), 0.40, 1),
     ]
+
+    if latest_alert_title:
+        lines.insert(1, (f"ALERT: {latest_alert_title[:24]}", (0, 0, 255), 0.42, 2))
 
     y_offset = panel_y1 + 18
     for text, color, scale, thickness in lines:
@@ -310,7 +372,7 @@ def draw_hud(
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="VISION Vertical Slice 6.0 - Face Recognition & ANPR Vehicle Intelligence Pipeline"
+        description="VISION Vertical Slice 7.0 - Event Intelligence & Alert Engine Pipeline"
     )
     parser.add_argument(
         "--video",
@@ -413,6 +475,30 @@ def parse_args():
         default="auto",
         help="OCR engine for license plate text extraction (default: auto)",
     )
+    parser.add_argument(
+        "--zones",
+        type=str,
+        default=None,
+        help="Path to YAML surveillance zone configuration file (e.g. configs/zones.yaml)",
+    )
+    parser.add_argument(
+        "--loitering-duration",
+        type=float,
+        default=30.0,
+        help="Dwell duration in seconds before triggering LOITERING for persons in restricted zones (default: 30.0)",
+    )
+    parser.add_argument(
+        "--stationary-duration",
+        type=float,
+        default=60.0,
+        help="Dwell duration in seconds before triggering SUSPICIOUS_VEHICLE for stopped vehicles (default: 60.0)",
+    )
+    parser.add_argument(
+        "--movement-threshold",
+        type=float,
+        default=15.0,
+        help="Displacement threshold in pixels below which an object is considered stationary (default: 15.0)",
+    )
     return parser.parse_args()
 
 
@@ -422,13 +508,17 @@ def main():
     model_display_name = "InsightFace W600K-R50" if args.face_model == "w600k_r50" else f"ArcFace R100 ({args.arcface_backend})"
 
     print("==================================================")
-    print("       VISION — Vertical Slice 6.0 Pipeline       ")
+    print("       VISION — Vertical Slice 7.0 Pipeline       ")
     print("==================================================")
     print(f" Video Path          : {args.video}")
     print(f" YOLO Model          : {args.model}")
     print(f" ANPR Enabled        : {not args.disable_anpr}")
     if not args.disable_anpr:
         print(f" OCR Engine          : {args.ocr_engine}")
+    if args.zones:
+        print(f" Zones Config        : {args.zones}")
+        print(f" Loitering Duration  : {args.loitering_duration:.1f}s")
+        print(f" Stationary Duration : {args.stationary_duration:.1f}s")
     print(f" Recognition Model   : {model_display_name}")
     print(f" Embedding Dim       : 512-D L2-Normalized")
     print(f" Alignment           : 5-Point Landmark Similarity Transform")
@@ -543,7 +633,23 @@ def main():
         plate_ocr = None
         plate_track_cache = None
 
-    window_name = "VISION - Vertical Slice 6.0 (Face + ANPR)"
+    # 8. Event Intelligence Engine & Zones Initialization
+    event_engine = None
+    configured_zones = []
+    if args.zones:
+        try:
+            configured_zones = load_zones_from_file(args.zones)
+            print(f"[INFO] Loaded {len(configured_zones)} surveillance zone(s) from '{args.zones}'.")
+            event_engine = EventEngine(
+                zones=configured_zones,
+                loitering_duration=args.loitering_duration,
+                stationary_duration=args.stationary_duration,
+                movement_threshold=args.movement_threshold,
+            )
+        except Exception as e:
+            print(f"[WARNING] Failed to load zones from '{args.zones}': {e}. Event engine disabled.", file=sys.stderr)
+
+    window_name = "VISION - Vertical Slice 7.0 (Events & Alerts)"
     has_gui = True
     try:
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
@@ -839,21 +945,93 @@ def main():
             actual_source_fps = (
                 frame_index / elapsed_total if elapsed_total > 0 else source.fps
             )
+            current_timestamp = (
+                frame_index / source.fps if source.fps > 0 else frame_index * 0.033
+            )
+
+            # ----------------------------------------------------
+            # Slice 7: Event Intelligence Evaluation
+            # ----------------------------------------------------
+            breached_zone_ids: Set[str] = set()
+            latest_alert_title: Optional[str] = None
+
+            if event_engine is not None:
+                # Construct unified ObjectState for each active track
+                object_states = []
+                for trk in latest_tracks:
+                    tid = trk.track_id
+                    match_info = track_identity_cache.get(tid)
+                    p_rec = track_plate_map.get(tid)
+
+                    has_face = match_info is not None
+                    if has_face:
+                        ident = match_info.identity if match_info.is_match else "UNKNOWN"
+                        sim = match_info.similarity
+                    else:
+                        ident = None
+                        sim = None
+
+                    plate_txt = p_rec.cleaned_text if p_rec is not None else None
+                    plate_conf = p_rec.confidence if p_rec is not None else None
+
+                    st = ObjectState(
+                        track_id=tid,
+                        object_type=trk.class_name,
+                        bbox=trk.bbox,
+                        confidence=trk.confidence,
+                        camera_id="BOP-01",
+                        identity=ident,
+                        face_similarity=sim,
+                        has_face_detected=has_face,
+                        plate=plate_txt,
+                        plate_confidence=plate_conf,
+                        first_seen=current_timestamp,
+                        last_seen=current_timestamp,
+                    )
+                    object_states.append(st)
+
+                # Update deterministic event engine
+                new_events, new_alerts = event_engine.update(
+                    object_states, timestamp=current_timestamp
+                )
+
+                # Console notification for new alerts
+                for alr in new_alerts:
+                    print(
+                        f"\n[SECURITY ALERT] {alr.title} | Camera: BOP-01 | "
+                        f"Track: #{alr.metadata.get('object_type', 'object')} | "
+                        f"Zone: {alr.metadata.get('zone_name')} | Severity: {alr.severity.value}",
+                        file=sys.stderr,
+                    )
+
+                # Identify currently breached zones
+                for z in configured_zones:
+                    if z.zone_type == "restricted":
+                        for obj in object_states:
+                            if point_in_zone(obj.position, z):
+                                breached_zone_ids.add(z.id)
+                                break
+
+                if event_engine.active_alerts:
+                    latest_alert_title = event_engine.active_alerts[-1].title
 
             # Annotate frame
             annotated_frame = draw_annotations(
-                frame,
-                latest_tracks,
-                latest_faces,
-                latest_associations,
-                track_identity_cache,
-                latest_plates,
-                track_plate_map,
+                frame=frame,
+                tracks=latest_tracks,
+                faces=latest_faces,
+                associations=latest_associations,
+                track_identity_map=track_identity_cache,
+                plates=latest_plates,
+                track_plate_map=track_plate_map,
+                zones=configured_zones,
+                breached_zone_ids=breached_zone_ids,
             )
 
             # Calculate unique flagged tracks
             unique_flagged = sum(1 for m in track_identity_cache.values() if not m.is_match)
             active_vehicles_count = len([t for t in latest_tracks if t.class_name in TARGET_VEHICLE_CLASSES])
+            active_events_count = len(event_engine.event_history) if event_engine else 0
 
             # Draw HUD
             final_frame = draw_hud(
@@ -874,6 +1052,8 @@ def main():
                 face_model_name=model_display_name,
                 vehicles_tracked_count=active_vehicles_count,
                 plates_read_count=len(track_plate_map),
+                active_events_count=active_events_count,
+                latest_alert_title=latest_alert_title,
             )
 
             # Display frame if GUI available
@@ -908,7 +1088,7 @@ def main():
         else 0.0
     )
     print("==================================================")
-    print("VISION — Slice 6.0 Summary (Face + ANPR)")
+    print("VISION — Slice 7.0 Summary (Events + Face + ANPR)")
     print("==================================================")
     print(f"Frames Processed       : {frame_index}")
     print(f"YOLO Inferences        : {inference_count}")
@@ -926,6 +1106,15 @@ def main():
         print(f"Unique Plates Read     : {len(track_plate_map)}")
         for tid, prec in track_plate_map.items():
             print(f"  • Vehicle Track #{tid}: {format_indian_plate(prec.cleaned_text)} (conf: {prec.confidence:.2f}, valid: {prec.is_valid})")
+    if event_engine is not None:
+        print(f"Surveillance Zones     : {len(configured_zones)}")
+        print(f"Total Security Events  : {len(event_engine.event_history)}")
+        print(f"Total Alerts Emitted   : {len(event_engine.active_alerts)}")
+        event_counts = {}
+        for ev in event_engine.event_history:
+            event_counts[ev.event_type.value] = event_counts.get(ev.event_type.value, 0) + 1
+        for ev_type, count in event_counts.items():
+            print(f"  • {ev_type}: {count}")
     print(f"Recognition Model      : {model_display_name}")
     print(f"Alignment              : 5-Point Landmark Similarity Transform")
     print(f"Recognition Threshold  : {args.face_threshold:.2f}")

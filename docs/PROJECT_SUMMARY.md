@@ -3,13 +3,17 @@
 **Platform:** VISION (AI-Powered Intelligent Border Video Analytics Platform)  
 **Repository:** [https://github.com/Niranjan-cyber/VISION.git](https://github.com/Niranjan-cyber/VISION.git)  
 **Active Branch:** `main`  
-**Status:** ✅ **Vertical Slices 1, 2, 3, 4, 5, 5.1–5.7 Completed, Verified & Pushed**
+**Status:** ✅ **Vertical Slices 1, 2, 3, 4, 5, 5.1–5.7, 6.0 & 7.0 Completed, Verified & Pushed**
 
 ---
 
 ## 📌 Executive Overview
 
 **VISION** is a modular, high-performance video analytics and surveillance intelligence platform engineered for border monitoring and critical zone security. The system ingests conventional CCTV camera streams, runs real-time deep-learning object detection (YOLO11n), performs multi-object trajectory tracking (ByteTrack), extracts person crops for deep face detection and 5-point facial landmark estimation (YuNet), associates detected faces to persistent person track IDs via spatial IoU, aligns facial crops via 5-point similarity transformation, extracts 512-dimensional L2-normalized feature embeddings using InsightFace W600K-R50, and matches embeddings against an in-memory reference face gallery via cosine similarity and margin verification.
+
+In Vertical Slice 6.0, an end-to-end Automatic Number Plate Recognition (ANPR) and vehicle intelligence subsystem was integrated with plate detection, enhancement, OCR abstraction, and temporal consensus caching.
+
+In Vertical Slice 7.0, an Event Intelligence & Alert Engine was added on top of perception outputs, providing polygon surveillance zones, ray-casting point-in-polygon geometry on ground coordinates, temporal state transitions, intrusion detection, unknown-person intrusion detection, loitering, and suspicious stationary vehicle rules with stateful deduplication and user-facing operational alerts.
 
 ---
 
@@ -167,6 +171,19 @@ Vehicle Tracks                    Person Tracks (class_name == "person")
 - Implemented `PlateTrackCache` in `src/anpr/cache.py` providing temporal confidence pooling, multi-frame majority consensus voting, and $O(1)$ track lookups.
 - Integrated full ANPR pipeline into `src/main.py` with vehicle plate badges, real-time HUD counters, and comprehensive exit telemetry.
 
+### Vertical Slice 7.0: Event Intelligence & Alert Engine
+- Implemented unified `ObjectState` in `src/events/state.py` bridging tracking, face recognition, ANPR plates, and ground coordinates (`bbox.bottom_center`).
+- Implemented `Zone` configuration, YAML schema parsing, and validation in `src/events/zone.py` and `configs/zones.yaml`.
+- Implemented geometric point-in-polygon evaluation (`point_in_zone`) using OpenCV `pointPolygonTest` on bottom-center ground coordinates.
+- Implemented deterministic `EventEngine` in `src/events/engine.py` with temporal state tracking and rule evaluations:
+  - **INTRUSION (HIGH):** Triggered on outside $\to$ inside transition into a restricted zone for both persons and vehicles.
+  - **UNKNOWN_PERSON_INTRUSION (HIGH):** Evaluates when a person track enters a restricted zone with a detected face that fails enrolled gallery matching (`identity == "UNKNOWN"`), distinguishing unverified vs explicitly unknown subjects.
+  - **LOITERING (MEDIUM):** Triggered when a person dwells continuously inside a restricted zone $\ge 30\text{s}$. Duplicate events suppressed until zone exit and re-entry.
+  - **SUSPICIOUS_VEHICLE (MEDIUM):** Evaluates vehicle displacement over recent trajectory history; if displacement $< 15\text{px}$ for $\ge 60\text{s}$, fires alert including license plate details when available.
+  - **Stateful Event Deduplication:** Uses key `(track_id, event_type, zone_id)` to prevent redundant event spam per frame.
+  - **Alert Representation:** Generates operational `Alert` objects with lifecycle statuses (`NEW`, `ACKNOWLEDGED`, `RESOLVED`) and structured alert messages.
+- Integrated event engine into `src/main.py` with `--zones`, `--loitering-duration`, `--stationary-duration`, `--movement-threshold` CLI options, semi-transparent zone rendering, HUD telemetry, and end-of-stream statistics.
+
 ---
 
 ## ⚠️ Current Issues & Diagnostic Findings
@@ -185,7 +202,16 @@ Vehicle Tracks                    Person Tracks (class_name == "person")
 ## 🧪 Test Suite Status
 
 ```text
-Ran 86 tests in 19.802s
+Ran 129 tests in ~96s
 OK
 ```
-All **86 unit and integration tests** pass synchronously covering all modules from video ingestion to cross-environment diagnostics.
+All **129 unit and integration tests** pass synchronously covering all modules:
+- Video Ingestion & YOLO Detection
+- ByteTrack Tracking
+- YuNet Face Detection & 5-Point Landmark Extraction
+- Face-Track Association & Global Coordinate Transform
+- InsightFace W600K-R50 & Alignment
+- Cross-Environment Diagnostic Suite
+- ANPR Plate Detection, Enhancement, OCR & Temporal Consensus
+- PostgreSQL Vector DB Persistence
+- Event Geometry, Zone Config Validation, EventEngine Rule Evaluation & Scenario Tests
