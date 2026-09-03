@@ -1,0 +1,28 @@
+# VISION — Golden Demo Zone Configuration
+#
+# Calibrated specifically for the official demo video: data/videos/shreyas1.mp4
+# (resolution 478x850). Verified against the actual detected/tracked bottom-center
+# trajectory of the subject in that clip (clustered around x:218-275, y:845-849
+# for the full ~4.3s clip) — this is NOT a generic/unverified polygon like
+# configs/zones.yaml.
+#
+# Framed as a "Checkpoint Entry Zone" rather than a border-crossing zone because
+# the subject is already standing in frame when the clip starts (no walk-in
+# motion in this footage) — INTRUSION will fire almost immediately after the
+# person is detected, which is an honest and still meaningful demonstration of
+# a monitored checkpoint/entry point rather than a staged long-distance crossing.
+#
+# Do not reuse this file for a different video without re-validating the
+# subject's actual trajectory against the new frame resolution.
+
+zones:
+  - id: checkpoint_entry_zone
+    name: Checkpoint Entry Zone
+    type: restricted
+    polygon:
+      - [80, 650]
+      - [400, 650]
+      - [400, 850]
+      - [80, 850]
+    metadata:
+      description: "Golden demo zone for shreyas1.mp4 — covers the bottom band of frame where the subject stands throughout the clip."

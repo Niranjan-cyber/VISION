@@ -1,10 +1,48 @@
 import os
+import sys
+import tempfile
+import urllib.request
+import zipfile
 from typing import Optional
 import numpy as np
 import onnxruntime as ort
 
 from src.core.types import FaceEmbedding
 from src.face.w600k_preprocessing import preprocess_w600k_crop
+
+# Official InsightFace "buffalo_l" model pack, which bundles w600k_r50.onnx.
+BUFFALO_L_URL = "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip"
+BUFFALO_L_W600K_MEMBER = "w600k_r50.onnx"
+
+
+def _download_w600k_r50(target_path: str) -> None:
+    """
+    Downloads the official InsightFace buffalo_l model pack and extracts
+    w600k_r50.onnx to target_path. Mirrors the auto-download fallback already
+    used for the YuNet face detector in src/face/detector.py.
+    """
+    os.makedirs(os.path.dirname(target_path) or ".", exist_ok=True)
+    print(
+        f"[INFO] Face recognition model not found locally at '{target_path}'. "
+        f"Downloading InsightFace buffalo_l pack (this is a one-time ~275MB download)...",
+        file=sys.stderr,
+    )
+    tmp_fd, tmp_zip_path = tempfile.mkstemp(suffix=".zip")
+    os.close(tmp_fd)
+    try:
+        urllib.request.urlretrieve(BUFFALO_L_URL, tmp_zip_path)
+        with zipfile.ZipFile(tmp_zip_path) as zf:
+            with zf.open(BUFFALO_L_W600K_MEMBER) as src, open(target_path, "wb") as dst:
+                dst.write(src.read())
+        print(f"[INFO] Successfully extracted '{BUFFALO_L_W600K_MEMBER}' to '{target_path}'.", file=sys.stderr)
+    except Exception as e:
+        print(f"[ERROR] Failed to download/extract face recognition model: {e}", file=sys.stderr)
+        raise RuntimeError(
+            f"Unable to obtain '{BUFFALO_L_W600K_MEMBER}' from {BUFFALO_L_URL}"
+        ) from e
+    finally:
+        if os.path.exists(tmp_zip_path):
+            os.remove(tmp_zip_path)
 
 
 class W600KR50Embedder:
@@ -17,9 +55,7 @@ class W600KR50Embedder:
         self.model_path = model_path
 
         if not os.path.exists(self.model_path):
-            raise FileNotFoundError(
-                f"Modern InsightFace model checkpoint not found at '{self.model_path}'."
-            )
+            _download_w600k_r50(self.model_path)
 
         # Initialize ONNX Runtime Inference Session
         options = ort.SessionOptions()

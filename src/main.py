@@ -10,51 +10,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import cv2
 import numpy as np
 
-from src.core.types import (
-    BoundingBox,
-    Detection,
-    FaceDetection,
-    FaceEmbedding,
-    IdentityMatch,
-    PlateDetection,
-    PlateRecognitionResult,
-    Track,
-    VehiclePlateAssociation,
-)
-from src.anpr import (
-    LicensePlateDetector,
-    PlateEnhancer,
-    PlateTrackCache,
-    clean_plate_text,
-    format_indian_plate,
-    get_plate_ocr_engine,
-    map_crop_to_global_bbox,
-)
-from src.detection.detector import YOLODetector
-from src.events import (
-    Alert,
-    EventEngine,
-    EventType,
-    ObjectState,
-    SecurityEvent,
-    Severity,
-    Zone,
-    load_zones_from_file,
-    point_in_zone,
-)
-from src.face.alignment import align_face
-from src.face.association import FaceTrackAssociation, associate_faces_to_tracks
-from src.face.detector import FaceDetector
-from src.face.embedder import (
-    FaceEmbedder,
-    ONNXRuntimeArcFaceEmbedder,
-    OpenCVArcFaceEmbedder,
-)
-from src.face.gallery import load_gallery_from_dir
-from src.face.matcher import FaceMatcher
-from src.face.modern_embedder import W600KR50Embedder
-from src.ingestion.video import VideoSource
-from src.tracking.tracker import ByteTrackTracker
+from src.core.types import FaceDetection, IdentityMatch, PlateRecognitionResult, Track
+from src.anpr import format_indian_plate
+from src.events import Zone
+from src.face.association import FaceTrackAssociation
+from src.pipeline import PipelineSession, PipelineSubsystemError
 
 # Target classes for vehicle intelligence
 TARGET_VEHICLE_CLASSES: Set[str] = {"car", "truck", "bus", "motorcycle"}
@@ -377,7 +337,7 @@ def parse_args():
     parser.add_argument(
         "--video",
         type=str,
-        default="data/videos/test.mp4",
+        default="data/videos/shreyas1.mp4",
         help="Path to input video file (MP4 format)",
     )
     parser.add_argument(
@@ -413,8 +373,8 @@ def parse_args():
     parser.add_argument(
         "--db-uri",
         type=str,
-        default=os.environ.get("VISION_DB_URI", os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/vision_db")),
-        help="PostgreSQL connection URI (default: read from VISION_DB_URI/DATABASE_URL or postgresql://postgres:postgres@localhost:5432/vision_db)",
+        default=os.environ.get("VISION_DB_URI", os.environ.get("DATABASE_URL")),
+        help="Optional PostgreSQL connection URI for persistent gallery storage (default: read from VISION_DB_URI/DATABASE_URL env vars, or disabled/in-memory if unset)",
     )
     parser.add_argument(
         "--interval",
@@ -533,121 +493,41 @@ def main():
     print(f" Inference Interval  : Every {args.interval} frame(s)")
     print("==================================================")
 
-    if args.debug_face_crops:
-        os.makedirs("scratch/debug_face_crops", exist_ok=True)
-    if args.debug_face_alignment:
-        os.makedirs("data/debug/aligned_faces", exist_ok=True)
-
-    # 1. Ingestion Initialization
+    # Build the shared pipeline session (video ingestion, detection, tracking,
+    # face recognition, ANPR, zones/event engine). This is the single
+    # implementation of the AI orchestration — the FastAPI backend drives the
+    # exact same PipelineSession class, so there is no parallel pipeline here.
     try:
-        source = VideoSource(args.video)
-    except FileNotFoundError as fnf_err:
-        print(f"[ERROR] {fnf_err}", file=sys.stderr)
-        sys.exit(1)
-    except ValueError as val_err:
-        print(f"[ERROR] {val_err}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print(f"[ERROR] Unexpected error opening video: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    print(
-        f"[INFO] Video loaded successfully. Resolution: {source.width}x{source.height}, "
-        f"FPS: {source.fps:.2f}, Total Frames: {source.frame_count}"
-    )
-
-    # 2. YOLODetector Initialization
-    try:
-        detector = YOLODetector(
-            model_name=args.model,
-            confidence_threshold=args.confidence,
+        session = PipelineSession(
+            video_path=args.video,
+            model=args.model,
+            confidence=args.confidence,
+            face_confidence=args.face_confidence,
+            face_threshold=args.face_threshold,
+            face_margin=args.face_margin,
+            gallery_dir=args.gallery_dir,
+            db_uri=args.db_uri,
+            interval=args.interval,
+            face_model=args.face_model,
+            arcface_backend=args.arcface_backend,
+            enable_anpr=not args.disable_anpr,
+            plate_model=args.plate_model,
+            ocr_engine=args.ocr_engine,
+            zones_path=args.zones,
+            loitering_duration=args.loitering_duration,
+            stationary_duration=args.stationary_duration,
+            movement_threshold=args.movement_threshold,
+            debug_face_matching=args.debug_face_matching,
+            debug_face_alignment=args.debug_face_alignment,
+            debug_face_crops=args.debug_face_crops,
+            verbose=True,
         )
-    except Exception as e:
-        print(f"[ERROR] Detector initialization failed: {e}", file=sys.stderr)
-        source.release()
+    except PipelineSubsystemError as e:
+        print(f"[ERROR] {e.subsystem} initialization failed: {e}", file=sys.stderr)
         sys.exit(1)
-
-    # 3. ByteTrackTracker Initialization
-    try:
-        tracker = ByteTrackTracker(
-            track_thresh=args.confidence,
-            match_thresh=0.8,
-            track_buffer=30,
-        )
     except Exception as e:
-        print(f"[ERROR] Tracker initialization failed: {e}", file=sys.stderr)
-        source.release()
+        print(f"[ERROR] Unexpected error initializing pipeline: {e}", file=sys.stderr)
         sys.exit(1)
-
-    # 4. FaceDetector Initialization
-    try:
-        face_detector = FaceDetector(score_threshold=args.face_confidence)
-    except Exception as e:
-        print(f"[ERROR] FaceDetector initialization failed: {e}", file=sys.stderr)
-        source.release()
-        sys.exit(1)
-
-    # 5. FaceEmbedder Initialization based on --face-model
-    try:
-        if args.face_model == "w600k_r50":
-            face_embedder = W600KR50Embedder(model_path="models/w600k_r50.onnx")
-        else:
-            if args.arcface_backend == "opencv":
-                face_embedder = OpenCVArcFaceEmbedder()
-            else:
-                face_embedder = ONNXRuntimeArcFaceEmbedder()
-    except Exception as e:
-        print(f"[ERROR] FaceEmbedder initialization failed: {e}", file=sys.stderr)
-        source.release()
-        sys.exit(1)
-
-    # 6. FaceGallery & FaceMatcher Initialization
-    try:
-        print(f"[INFO] Connecting to database: {args.db_uri}", file=sys.stderr)
-        gallery = load_gallery_from_dir(
-            args.gallery_dir, face_detector, face_embedder, db_uri=args.db_uri
-        )
-        face_matcher = FaceMatcher(
-            gallery, threshold=args.face_threshold, margin=args.face_margin
-        )
-    except Exception as e:
-        print(f"[WARNING] PostgreSQL database initialization failed ({e}). Falling back to in-memory mode.", file=sys.stderr)
-        try:
-            gallery = load_gallery_from_dir(args.gallery_dir, face_detector, face_embedder, db_uri=None)
-            face_matcher = FaceMatcher(gallery, threshold=args.face_threshold, margin=args.face_margin)
-        except Exception as fallback_err:
-            print(f"[ERROR] Face Gallery/Matcher fallback initialization failed: {fallback_err}", file=sys.stderr)
-            source.release()
-            sys.exit(1)
-
-    # 7. ANPR Engine Initialization
-    enable_anpr = not args.disable_anpr
-    if enable_anpr:
-        plate_detector = LicensePlateDetector(model_path=args.plate_model)
-        plate_enhancer = PlateEnhancer(target_height=70)
-        plate_ocr = get_plate_ocr_engine(args.ocr_engine)
-        plate_track_cache = PlateTrackCache()
-    else:
-        plate_detector = None
-        plate_enhancer = None
-        plate_ocr = None
-        plate_track_cache = None
-
-    # 8. Event Intelligence Engine & Zones Initialization
-    event_engine = None
-    configured_zones = []
-    if args.zones:
-        try:
-            configured_zones = load_zones_from_file(args.zones)
-            print(f"[INFO] Loaded {len(configured_zones)} surveillance zone(s) from '{args.zones}'.")
-            event_engine = EventEngine(
-                zones=configured_zones,
-                loitering_duration=args.loitering_duration,
-                stationary_duration=args.stationary_duration,
-                movement_threshold=args.movement_threshold,
-            )
-        except Exception as e:
-            print(f"[WARNING] Failed to load zones from '{args.zones}': {e}. Event engine disabled.", file=sys.stderr)
 
     window_name = "VISION - Vertical Slice 7.0 (Events & Alerts)"
     has_gui = True
@@ -661,397 +541,66 @@ def main():
         )
         has_gui = False
 
-    latest_detections: List[Detection] = []
-    latest_tracks: List[Track] = []
-    latest_faces: List[FaceDetection] = []
-    latest_associations: List[FaceTrackAssociation] = []
-    latest_plates: List[PlateRecognitionResult] = []
-    track_plate_map: Dict[int, PlateRecognitionResult] = {}
-    total_plates_detected = 0
-
-    # Track-level identity cache: track_id -> IdentityMatch
-    track_identity_cache: Dict[int, IdentityMatch] = {}
-    aligned_debug_saved_count = 0
-
     frame_index = 0
-    inference_count = 0
-    total_inference_time = 0.0
-    recent_inference_fps = 0.0
-
-    total_detections = 0
-    total_faces_detected = 0
-    total_faces_associated = 0
-    total_embeddings_generated = 0
-    total_recognized_faces = 0
-    total_unknown_faces = 0
-    observed_unique_track_ids: Set[int] = set()
-    max_active_tracks = 0
-
-    start_time = time.time()
 
     try:
         while True:
             frame_start = time.time()
-            frame = source.read_frame()
+            frame = session.source.read_frame()
 
             if frame is None:
                 print("[INFO] Reached end of video stream.")
                 break
 
-            frame_index = source.current_frame
-            frame_h, frame_w = frame.shape[:2]
+            frame_index = session.source.current_frame
+            session.process_frame(frame, frame_index)
 
-            # Frame Sampling: Run YOLO, Face Detection, Embedding & Recognition every Nth frame
-            if (frame_index - 1) % args.interval == 0:
-                t0 = time.time()
-
-                # A. YOLO Detection
-                latest_detections = detector.detect(frame)
-
-                # B. ByteTrack Tracking
-                latest_tracks = tracker.update(latest_detections, frame_index)
-
-                # C. Person-Only Face Detection & Coordinate Conversion
-                person_tracks = [t for t in latest_tracks if t.class_name == "person"]
-                current_frame_faces: List[FaceDetection] = []
-
-                for person in person_tracks:
-                    pb = person.bbox
-                    px1 = max(0, min(pb.x1, frame_w))
-                    py1 = max(0, min(pb.y1, frame_h))
-                    px2 = max(0, min(pb.x2, frame_w))
-                    py2 = max(0, min(pb.y2, frame_h))
-
-                    if px2 <= px1 or py2 <= py1:
-                        continue
-
-                    person_crop = frame[py1:py2, px1:px2]
-                    crop_faces = face_detector.detect(person_crop)
-
-                    for crop_face in crop_faces:
-                        fb = crop_face.bbox
-                        gx1 = max(0, min(px1 + fb.x1, frame_w))
-                        gy1 = max(0, min(py1 + fb.y1, frame_h))
-                        gx2 = max(0, min(px1 + fb.x2, frame_w))
-                        gy2 = max(0, min(py1 + fb.y2, frame_h))
-
-                        if gx2 <= gx1 or gy2 <= gy1:
-                            continue
-
-                        # Convert crop-relative landmarks to global frame coordinates
-                        global_landmarks = None
-                        if crop_face.landmarks is not None:
-                            global_landmarks = crop_face.landmarks.copy()
-                            global_landmarks[:, 0] += px1
-                            global_landmarks[:, 1] += py1
-
-                        global_face = FaceDetection(
-                            bbox=BoundingBox(x1=gx1, y1=gy1, x2=gx2, y2=gy2),
-                            confidence=crop_face.confidence,
-                            landmarks=global_landmarks,
-                        )
-                        current_frame_faces.append(global_face)
-
-                latest_faces = current_frame_faces
-
-                # D. Face-to-Track Association
-                latest_associations = associate_faces_to_tracks(latest_tracks, latest_faces)
-
-                # E. Face Recognition for Associated Faces
-                frame_recognized_count = 0
-                frame_unknown_count = 0
-
-                for assoc in latest_associations:
-                    track_id = assoc.track_id
-
-                    # Check track-level identity cache
-                    if track_id in track_identity_cache:
-                        match_result = track_identity_cache[track_id]
-                    else:
-                        # 1. Attempt 5-point landmark similarity warp alignment
-                        aligned_crop = None
-                        if assoc.face.landmarks is not None:
-                            aligned_crop = align_face(frame, assoc.face.landmarks)
-
-                        if aligned_crop is not None:
-                            face_input = aligned_crop
-                        else:
-                            fb = assoc.face.bbox
-                            fx1 = max(0, min(fb.x1, frame_w))
-                            fy1 = max(0, min(fb.y1, frame_h))
-                            fx2 = max(0, min(fb.x2, frame_w))
-                            fy2 = max(0, min(fb.y2, frame_h))
-
-                            if fx2 <= fx1 or fy2 <= fy1:
-                                continue
-
-                            face_input = frame[fy1:fy2, fx1:fx2]
-
-                        if face_input.size == 0:
-                            continue
-
-                        if args.debug_face_alignment and aligned_debug_saved_count < 5:
-                            aligned_save_path = f"data/debug/aligned_faces/track_{track_id}_frame_{frame_index}.jpg"
-                            cv2.imwrite(aligned_save_path, face_input)
-                            aligned_debug_saved_count += 1
-                            print(f"[DEBUG] Saved aligned face ({face_input.shape[1]}x{face_input.shape[0]}) to '{aligned_save_path}'")
-
-                        if args.debug_face_crops:
-                            crop_save_path = f"scratch/debug_face_crops/track_{track_id}_frame_{frame_index}.jpg"
-                            cv2.imwrite(crop_save_path, face_input)
-
-                        embedding = face_embedder.embed(face_input)
-                        if embedding is not None:
-                            total_embeddings_generated += 1
-                            match_result = face_matcher.match(embedding)
-                            track_identity_cache[track_id] = match_result
-
-                            if args.debug_face_matching:
-                                all_sims = face_matcher.get_all_similarities(embedding)
-                                print(f"\n--- Diagnostic Matching for Track #{track_id} (Frame {frame_index}) ---")
-                                for id_name, id_score in sorted(all_sims.items(), key=lambda x: x[1], reverse=True):
-                                    print(f"  {id_name}: {id_score:.4f}")
-                                print(f"  Best       : {match_result.identity if match_result.is_match else 'None'} ({match_result.similarity:.4f})")
-                                print(f"  Second-Best: {match_result.second_similarity:.4f}")
-                                print(f"  Margin     : {match_result.margin:.4f} (Required: >= {args.face_margin:.2f})")
-                                print(f"  Match Result: {'MATCH' if match_result.is_match else 'UNKNOWN'}")
-
-                            # Flag unrecognized/unknown users immediately
-                            if not match_result.is_match:
-                                print(f"[ALERT] Track #{track_id} is UNKNOWN and has been FLAGGED!", file=sys.stderr)
-                                if getattr(gallery, "db", None) is not None:
-                                    try:
-                                        vec = embedding.vector if isinstance(embedding, FaceEmbedding) else embedding
-                                        gallery.db.flag_unauthorized_user(
-                                            embedding=vec,
-                                            frame=face_crop,
-                                            track_id=track_id,
-                                            video_source=args.video
-                                        )
-                                        print(f"[INFO] Logged flagged event for track #{track_id} in PostgreSQL.", file=sys.stderr)
-                                    except Exception as db_err:
-                                        print(f"[WARNING] Failed to store flagged event in database: {db_err}", file=sys.stderr)
-                        else:
-                            match_result = IdentityMatch(identity=None, similarity=0.0, is_match=False)
-
-                    if match_result.is_match:
-                        frame_recognized_count += 1
-                    else:
-                        frame_unknown_count += 1
-
-                total_recognized_faces += frame_recognized_count
-                total_unknown_faces += frame_unknown_count
-
-                # F. Vehicle License Plate Recognition (ANPR)
-                current_frame_plates: List[PlateRecognitionResult] = []
-
-                if enable_anpr and plate_detector is not None:
-                    vehicle_tracks = [t for t in latest_tracks if t.class_name in TARGET_VEHICLE_CLASSES]
-                    for veh in vehicle_tracks:
-                        tid = veh.track_id
-                        cached_p = plate_track_cache.get(tid)
-
-                        # If already cached with high confidence, reuse to save compute
-                        if cached_p is not None and cached_p.confidence >= 0.85:
-                            current_frame_plates.append(cached_p)
-                            track_plate_map[tid] = cached_p
-                            continue
-
-                        vb = veh.bbox
-                        vx1 = max(0, min(vb.x1, frame_w))
-                        vy1 = max(0, min(vb.y1, frame_h))
-                        vx2 = max(0, min(vb.x2, frame_w))
-                        vy2 = max(0, min(vb.y2, frame_h))
-
-                        if (vx2 - vx1) < 30 or (vy2 - vy1) < 30:
-                            if cached_p is not None:
-                                current_frame_plates.append(cached_p)
-                                track_plate_map[tid] = cached_p
-                            continue
-
-                        veh_crop = frame[vy1:vy2, vx1:vx2]
-                        vh, vw = veh_crop.shape[:2]
-                        plate_dets = plate_detector.detect(veh_crop)
-
-                        best_candidate_res = None
-                        for pdet in plate_dets[:3]:
-                            pb = pdet.bbox
-                            # Add 4px vertical and 6px horizontal margin around detected plate box
-                            py1 = max(0, pb.y1 - 4)
-                            py2 = min(vh, pb.y2 + 4)
-                            px1 = max(0, pb.x1 - 6)
-                            px2 = min(vw, pb.x2 + 6)
-                            p_crop = veh_crop[py1:py2, px1:px2]
-                            if p_crop.size == 0 or (px2 - px1) < 40 or (py2 - py1) < 12:
-                                continue
-
-                            enh_crop = plate_enhancer.enhance(p_crop)
-                            target_crop = enh_crop if enh_crop is not None else p_crop
-                            raw_txt, ocr_conf = plate_ocr.recognize(target_crop)
-                            cln_txt, is_valid, mult = clean_plate_text(raw_txt)
-
-                            if cln_txt and (is_valid or len(cln_txt) >= 7):
-                                g_bbox = map_crop_to_global_bbox(
-                                    BoundingBox(x1=px1, y1=py1, x2=px2, y2=py2),
-                                    BoundingBox(x1=vx1, y1=vy1, x2=vx2, y2=vy2),
-                                    frame_w,
-                                    frame_h,
-                                )
-                                cand_res = PlateRecognitionResult(
-                                    raw_text=raw_txt,
-                                    cleaned_text=cln_txt,
-                                    confidence=ocr_conf * mult,
-                                    is_valid=is_valid,
-                                    bbox=g_bbox,
-                                )
-                                # If full valid Indian plate, take it immediately
-                                if is_valid and len(cln_txt) in {9, 10}:
-                                    best_candidate_res = cand_res
-                                    break
-                                elif best_candidate_res is None or len(cln_txt) > len(best_candidate_res.cleaned_text):
-                                    best_candidate_res = cand_res
-
-                        if best_candidate_res is not None:
-                            updated_res = plate_track_cache.update(tid, best_candidate_res, frame_index)
-                            current_frame_plates.append(updated_res)
-                            track_plate_map[tid] = updated_res
-                            total_plates_detected += 1
-                        elif cached_p is not None:
-                            current_frame_plates.append(cached_p)
-                            track_plate_map[tid] = cached_p
-
-                    latest_plates = current_frame_plates
-
-                t1 = time.time()
-
-                inf_time = t1 - t0
-                total_inference_time += inf_time
-                inference_count += 1
-                if inf_time > 0:
-                    recent_inference_fps = 1.0 / inf_time
-
-                # Metrics accumulation
-                total_detections += len(latest_detections)
-                total_faces_detected += len(latest_faces)
-                total_faces_associated += len(latest_associations)
-
-                for trk in latest_tracks:
-                    observed_unique_track_ids.add(trk.track_id)
-
-                if len(latest_tracks) > max_active_tracks:
-                    max_active_tracks = len(latest_tracks)
-
-            elapsed_total = time.time() - start_time
+            elapsed_total = time.time() - session.start_time
             actual_source_fps = (
-                frame_index / elapsed_total if elapsed_total > 0 else source.fps
-            )
-            current_timestamp = (
-                frame_index / source.fps if source.fps > 0 else frame_index * 0.033
+                frame_index / elapsed_total if elapsed_total > 0 else session.source.fps
             )
 
-            # ----------------------------------------------------
-            # Slice 7: Event Intelligence Evaluation
-            # ----------------------------------------------------
-            breached_zone_ids: Set[str] = set()
             latest_alert_title: Optional[str] = None
-
-            if event_engine is not None:
-                # Construct unified ObjectState for each active track
-                object_states = []
-                for trk in latest_tracks:
-                    tid = trk.track_id
-                    match_info = track_identity_cache.get(tid)
-                    p_rec = track_plate_map.get(tid)
-
-                    has_face = match_info is not None
-                    if has_face:
-                        ident = match_info.identity if match_info.is_match else "UNKNOWN"
-                        sim = match_info.similarity
-                    else:
-                        ident = None
-                        sim = None
-
-                    plate_txt = p_rec.cleaned_text if p_rec is not None else None
-                    plate_conf = p_rec.confidence if p_rec is not None else None
-
-                    st = ObjectState(
-                        track_id=tid,
-                        object_type=trk.class_name,
-                        bbox=trk.bbox,
-                        confidence=trk.confidence,
-                        camera_id="BOP-01",
-                        identity=ident,
-                        face_similarity=sim,
-                        has_face_detected=has_face,
-                        plate=plate_txt,
-                        plate_confidence=plate_conf,
-                        first_seen=current_timestamp,
-                        last_seen=current_timestamp,
-                    )
-                    object_states.append(st)
-
-                # Update deterministic event engine
-                new_events, new_alerts = event_engine.update(
-                    object_states, timestamp=current_timestamp
-                )
-
-                # Console notification for new alerts
-                for alr in new_alerts:
-                    print(
-                        f"\n[SECURITY ALERT] {alr.title} | Camera: BOP-01 | "
-                        f"Track: #{alr.metadata.get('object_type', 'object')} | "
-                        f"Zone: {alr.metadata.get('zone_name')} | Severity: {alr.severity.value}",
-                        file=sys.stderr,
-                    )
-
-                # Identify currently breached zones
-                for z in configured_zones:
-                    if z.zone_type == "restricted":
-                        for obj in object_states:
-                            if point_in_zone(obj.position, z):
-                                breached_zone_ids.add(z.id)
-                                break
-
-                if event_engine.active_alerts:
-                    latest_alert_title = event_engine.active_alerts[-1].title
+            if session.event_engine is not None and session.event_engine.active_alerts:
+                latest_alert_title = session.event_engine.active_alerts[-1].title
 
             # Annotate frame
             annotated_frame = draw_annotations(
                 frame=frame,
-                tracks=latest_tracks,
-                faces=latest_faces,
-                associations=latest_associations,
-                track_identity_map=track_identity_cache,
-                plates=latest_plates,
-                track_plate_map=track_plate_map,
-                zones=configured_zones,
-                breached_zone_ids=breached_zone_ids,
+                tracks=session.latest_tracks,
+                faces=session.latest_faces,
+                associations=session.latest_associations,
+                track_identity_map=session.track_identity_cache,
+                plates=session.latest_plates,
+                track_plate_map=session.track_plate_map,
+                zones=session.zones,
+                breached_zone_ids=session.latest_breached_zone_ids,
             )
 
             # Calculate unique flagged tracks
-            unique_flagged = sum(1 for m in track_identity_cache.values() if not m.is_match)
-            active_vehicles_count = len([t for t in latest_tracks if t.class_name in TARGET_VEHICLE_CLASSES])
-            active_events_count = len(event_engine.event_history) if event_engine else 0
+            unique_flagged = sum(1 for m in session.track_identity_cache.values() if not m.is_match)
+            active_vehicles_count = len([t for t in session.latest_tracks if t.class_name in TARGET_VEHICLE_CLASSES])
+            active_events_count = len(session.event_engine.event_history) if session.event_engine else 0
 
             # Draw HUD
             final_frame = draw_hud(
                 frame=annotated_frame,
                 current_frame=frame_index,
-                total_frames=source.frame_count,
+                total_frames=session.source.frame_count,
                 source_fps=actual_source_fps,
-                inference_fps=recent_inference_fps,
-                active_tracks_count=len(latest_tracks),
-                detection_count=len(latest_detections),
-                faces_detected_count=len(latest_faces),
-                faces_associated_count=len(latest_associations),
-                embeddings_generated_count=total_embeddings_generated,
-                recognized_faces_count=total_recognized_faces,
+                inference_fps=session.recent_inference_fps,
+                active_tracks_count=len(session.latest_tracks),
+                detection_count=len(session.latest_detections),
+                faces_detected_count=len(session.latest_faces),
+                faces_associated_count=len(session.latest_associations),
+                embeddings_generated_count=session.total_embeddings_generated,
+                recognized_faces_count=session.total_recognized_faces,
                 flagged_tracks_count=unique_flagged,
                 recog_threshold=args.face_threshold,
                 recog_margin=args.face_margin,
                 face_model_name=model_display_name,
                 vehicles_tracked_count=active_vehicles_count,
-                plates_read_count=len(track_plate_map),
+                plates_read_count=len(session.track_plate_map),
                 active_events_count=active_events_count,
                 latest_alert_title=latest_alert_title,
             )
@@ -1060,7 +609,7 @@ def main():
             if has_gui:
                 cv2.imshow(window_name, final_frame)
 
-                target_delay_ms = max(1, int(1000 / source.fps)) if source.fps > 0 else 30
+                target_delay_ms = max(1, int(1000 / session.source.fps)) if session.source.fps > 0 else 30
                 processing_time_ms = int((time.time() - frame_start) * 1000)
                 wait_delay = max(1, target_delay_ms - processing_time_ms)
 
@@ -1069,49 +618,49 @@ def main():
                     print("[INFO] Exit key 'q' pressed by user. Shutting down...")
                     break
             else:
-                if frame_index % 25 == 0 or frame_index == source.frame_count:
-                    total_str = f"/{source.frame_count}" if source.frame_count > 0 else ""
+                if frame_index % 25 == 0 or frame_index == session.source.frame_count:
+                    total_str = f"/{session.source.frame_count}" if session.source.frame_count > 0 else ""
                     print(
-                        f"[PROGRESS] Frame {frame_index}{total_str} | Tracks: {len(latest_tracks)} | "
-                        f"Faces: {total_recognized_faces} | Plates: {len(track_plate_map)} | Inf FPS: {recent_inference_fps:.1f}",
+                        f"[PROGRESS] Frame {frame_index}{total_str} | Tracks: {len(session.latest_tracks)} | "
+                        f"Faces: {session.total_recognized_faces} | Plates: {len(session.track_plate_map)} | Inf FPS: {session.recent_inference_fps:.1f}",
                         file=sys.stderr,
                     )
 
     finally:
-        source.release()
+        session.release()
         if has_gui:
             cv2.destroyAllWindows()
 
     avg_inf_fps = (
-        (inference_count / total_inference_time)
-        if total_inference_time > 0
+        (session.inference_count / session.total_inference_time)
+        if session.total_inference_time > 0
         else 0.0
     )
     print("==================================================")
     print("VISION — Slice 7.0 Summary (Events + Face + ANPR)")
     print("==================================================")
     print(f"Frames Processed       : {frame_index}")
-    print(f"YOLO Inferences        : {inference_count}")
-    print(f"Total Detections       : {total_detections}")
-    print(f"Unique Tracks          : {len(observed_unique_track_ids)}")
-    print(f"Max Active Tracks      : {max_active_tracks}")
-    print(f"Faces Detected         : {total_faces_detected}")
-    print(f"Faces Associated       : {total_faces_associated}")
-    print(f"Embeddings Generated   : {total_embeddings_generated}")
-    print(f"Recognized Faces       : {total_recognized_faces}")
-    print(f"Unknown Faces          : {total_unknown_faces}")
-    if enable_anpr:
+    print(f"YOLO Inferences        : {session.inference_count}")
+    print(f"Total Detections       : {session.total_detections}")
+    print(f"Unique Tracks          : {len(session.observed_unique_track_ids)}")
+    print(f"Max Active Tracks      : {session.max_active_tracks}")
+    print(f"Faces Detected         : {session.total_faces_detected}")
+    print(f"Faces Associated       : {session.total_faces_associated}")
+    print(f"Embeddings Generated   : {session.total_embeddings_generated}")
+    print(f"Recognized Faces       : {session.total_recognized_faces}")
+    print(f"Unknown Faces          : {session.total_unknown_faces}")
+    if session.enable_anpr:
         print(f"ANPR Engine            : Enabled ({args.ocr_engine})")
-        print(f"Plates Detected        : {total_plates_detected}")
-        print(f"Unique Plates Read     : {len(track_plate_map)}")
-        for tid, prec in track_plate_map.items():
+        print(f"Plates Detected        : {session.total_plates_detected}")
+        print(f"Unique Plates Read     : {len(session.track_plate_map)}")
+        for tid, prec in session.track_plate_map.items():
             print(f"  • Vehicle Track #{tid}: {format_indian_plate(prec.cleaned_text)} (conf: {prec.confidence:.2f}, valid: {prec.is_valid})")
-    if event_engine is not None:
-        print(f"Surveillance Zones     : {len(configured_zones)}")
-        print(f"Total Security Events  : {len(event_engine.event_history)}")
-        print(f"Total Alerts Emitted   : {len(event_engine.active_alerts)}")
+    if session.event_engine is not None:
+        print(f"Surveillance Zones     : {len(session.zones)}")
+        print(f"Total Security Events  : {len(session.event_engine.event_history)}")
+        print(f"Total Alerts Emitted   : {len(session.event_engine.active_alerts)}")
         event_counts = {}
-        for ev in event_engine.event_history:
+        for ev in session.event_engine.event_history:
             event_counts[ev.event_type.value] = event_counts.get(ev.event_type.value, 0) + 1
         for ev_type, count in event_counts.items():
             print(f"  • {ev_type}: {count}")
