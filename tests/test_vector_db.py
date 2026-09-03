@@ -16,6 +16,7 @@ class TestPostgresVectorDatabase(unittest.TestCase):
         # Mock connection and cursor
         self.mock_conn = MagicMock()
         self.mock_cursor = MagicMock()
+        self.mock_conn.__enter__.return_value = self.mock_conn
         self.mock_conn.cursor.return_value.__enter__.return_value = self.mock_cursor
         mock_connect.return_value = self.mock_conn
 
@@ -36,6 +37,7 @@ class TestPostgresVectorDatabase(unittest.TestCase):
         """TEST 2: add_user converts embeddings and frames to correct binary formats."""
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
+        mock_conn.__enter__.return_value = mock_conn
         mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
         mock_connect.return_value = mock_conn
 
@@ -68,6 +70,7 @@ class TestPostgresVectorDatabase(unittest.TestCase):
         """TEST 3: has_user_file queries the database and returns boolean correctly."""
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
+        mock_conn.__enter__.return_value = mock_conn
         mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
         mock_connect.return_value = mock_conn
 
@@ -86,6 +89,7 @@ class TestPostgresVectorDatabase(unittest.TestCase):
         """TEST 4: fetch_all_users reads and decodes embeddings and JPEG frames."""
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
+        mock_conn.__enter__.return_value = mock_conn
         mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
         mock_connect.return_value = mock_conn
 
@@ -118,6 +122,7 @@ class TestPostgresVectorDatabase(unittest.TestCase):
         """TEST 5: flag_unauthorized_user stores unrecognized person embedding and frame."""
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
+        mock_conn.__enter__.return_value = mock_conn
         mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
         mock_connect.return_value = mock_conn
 
