@@ -1,144 +1,97 @@
 """
-VISION FastAPI backend.
+VISION FastAPI backend — multi-camera command center.
 
-Thin API layer between the existing Python AI pipeline (src/pipeline/session.py)
-and the React dashboard. This module contains NO detection/tracking/face/ANPR/
-event logic of its own — it only:
-  1. Runs one PipelineSession in a background thread against the golden demo
-     video + zone config, looping at end-of-stream so the dashboard stays live.
-  2. Publishes the session's latest state as JSON (GET /detections, /events)
-     and its latest annotated frame as an MJPEG stream (GET /stream).
+Thin API layer between the existing Python AI pipeline
+(src/pipeline/session.py, src/pipeline/camera_manager.py) and the React
+dashboard. This module contains NO detection/tracking/face/ANPR/event logic
+of its own — it only:
+  1. Owns one CameraManager, which runs up to MAX_ACTIVE_CAMERAS independent
+     CameraSession objects (each one PipelineSession in its own thread).
+  2. Publishes per-camera and aggregate state as JSON, and per-camera
+     annotated frames as MJPEG.
+  3. Accepts new video uploads and turns them into new camera sessions.
 
-No Redis/Kafka/database — a single lock-guarded "latest state" snapshot is
-enough for one demo camera feed, matching the existing project's scale.
+No Redis/Kafka/database — CameraManager's in-memory dict of CameraSession
+objects is the entire "multi-camera infrastructure" this MVP needs.
 """
 import os
 import sys
-import threading
 import time
+import uuid
 from contextlib import asynccontextmanager
-from typing import Optional
 
-# Ensure project root is in sys.path when running uvicorn from anywhere
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-import cv2
-from fastapi import FastAPI
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from src.main import draw_annotations
-from src.pipeline.serialize import serialize_events, serialize_state
-from src.pipeline.session import PipelineSession, PipelineSubsystemError
+from src.pipeline.camera_manager import CameraLimitReached, CameraManager, MAX_ACTIVE_CAMERAS
+from src.pipeline.serialize import (
+    serialize_camera_summary,
+    serialize_events,
+    serialize_global_detections,
+    serialize_global_events,
+    serialize_global_status,
+    serialize_state,
+)
 
 # ---------------------------------------------------------------------------
 # Golden demo configuration.
-# See configs/zones_demo.yaml for why this specific video/zone pair was
-# chosen and how the zone was calibrated. Override via env vars if needed.
+# CAM-01 is the original single-camera golden demo (unchanged video/zone) —
+# see configs/zones_demo.yaml for calibration notes. CAM-02/03/04 use the
+# next-best verified videos in data/videos/, each with its own calibrated
+# zone file (configs/zones_cam0{2,3,4}.yaml) — no invented footage.
 # ---------------------------------------------------------------------------
-VIDEO_PATH = os.environ.get("VISION_DEMO_VIDEO", "data/videos/shreyas1.mp4")
-ZONES_PATH = os.environ.get("VISION_DEMO_ZONES", "configs/zones_demo.yaml")
-LOITERING_DURATION = float(os.environ.get("VISION_LOITERING_DURATION", "3.0"))
-STATIONARY_DURATION = float(os.environ.get("VISION_STATIONARY_DURATION", "60.0"))
-# ANPR defaults OFF: no shipped demo video has a verified-legible plate, and
-# EasyOCR is not installed — see docs/PROJECT_SUMMARY.md ANPR decision notes.
-# Never silently fall back to the heuristic OCR stub for a live demo.
+DEFAULT_CAMERAS = [
+    {
+        "camera_name": os.environ.get("VISION_CAM01_NAME", "Border Gate"),
+        "video_path": os.environ.get("VISION_DEMO_VIDEO", "data/videos/shreyas1.mp4"),
+        "zones_path": os.environ.get("VISION_DEMO_ZONES", "configs/zones_demo.yaml"),
+        "loitering_duration": float(os.environ.get("VISION_LOITERING_DURATION", "3.0")),
+    },
+    {
+        "camera_name": "BOP East",
+        "video_path": "data/videos/jaysingpure1.mp4",
+        "zones_path": "configs/zones_cam02.yaml",
+        "loitering_duration": 3.0,
+    },
+    {
+        "camera_name": "Perimeter Road",
+        "video_path": "data/videos/sample1.mp4",
+        "zones_path": "configs/zones_cam03.yaml",
+        "loitering_duration": 4.0,
+    },
+    {
+        "camera_name": "Restricted Zone",
+        "video_path": "data/videos/salman4.mp4",
+        "zones_path": "configs/zones_cam04.yaml",
+        "loitering_duration": 3.0,
+    },
+]
+# Lets tests / a lean single-camera run boot fast without waiting on 4x model loads.
+CAMERA_COUNT = int(os.environ.get("VISION_CAMERA_COUNT", "4"))
+# ANPR defaults OFF everywhere: no shipped video has a verified-legible plate,
+# and easyocr isn't installed — see docs/README ANPR decision notes.
 ENABLE_ANPR = os.environ.get("VISION_ENABLE_ANPR", "false").strip().lower() == "true"
 
-JPEG_QUALITY = 80
-STREAM_POLL_INTERVAL_S = 0.05
+UPLOAD_DIR = "data/uploads"
+ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv"}
+JPEG_STREAM_POLL_INTERVAL_S = 0.05
 
-# ---------------------------------------------------------------------------
-# Shared state between the background pipeline thread and the API handlers.
-# ---------------------------------------------------------------------------
-_lock = threading.Lock()
-_session: Optional[PipelineSession] = None
-_session_error: Optional[str] = None
-_latest_result = None
-_latest_jpeg: Optional[bytes] = None
-_stop_flag = threading.Event()
-_restart_flag = threading.Event()
-
-
-def _build_session() -> PipelineSession:
-    return PipelineSession(
-        video_path=VIDEO_PATH,
-        zones_path=ZONES_PATH,
-        loitering_duration=LOITERING_DURATION,
-        stationary_duration=STATIONARY_DURATION,
-        enable_anpr=ENABLE_ANPR,
-        verbose=True,
-    )
-
-
-def _pipeline_worker() -> None:
-    global _session, _session_error, _latest_result, _latest_jpeg
-
-    try:
-        session = _build_session()
-    except PipelineSubsystemError as e:
-        with _lock:
-            _session_error = f"{e.subsystem}: {e}"
-        print(f"[BACKEND ERROR] Pipeline failed to start ({e.subsystem}): {e}", file=sys.stderr)
-        return
-    except Exception as e:
-        with _lock:
-            _session_error = str(e)
-        print(f"[BACKEND ERROR] Pipeline failed to start: {e}", file=sys.stderr)
-        return
-
-    with _lock:
-        _session = session
-
-    print(f"[BACKEND] Pipeline session started. video={VIDEO_PATH} zones={ZONES_PATH} anpr={ENABLE_ANPR}", file=sys.stderr)
-
-    while not _stop_flag.is_set():
-        if _restart_flag.is_set():
-            session.restart()
-            _restart_flag.clear()
-            print("[BACKEND] Session restarted for a fresh demo run.", file=sys.stderr)
-
-        frame = session.source.read_frame()
-        if frame is None:
-            # Loop the golden clip so the dashboard stays continuously live.
-            session.restart()
-            continue
-
-        session.frame_index = session.source.current_frame
-        result = session.process_frame(frame, session.frame_index)
-
-        annotated = draw_annotations(
-            frame=frame,
-            tracks=session.latest_tracks,
-            faces=session.latest_faces,
-            associations=session.latest_associations,
-            track_identity_map=session.track_identity_cache,
-            plates=session.latest_plates,
-            track_plate_map=session.track_plate_map,
-            zones=session.zones,
-            breached_zone_ids=session.latest_breached_zone_ids,
-        )
-
-        ok, buf = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
-
-        with _lock:
-            _latest_result = result
-            if ok:
-                _latest_jpeg = buf.tobytes()
-
-    session.release()
-
-
-_worker_thread: Optional[threading.Thread] = None
+camera_manager = CameraManager()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _worker_thread
-    _worker_thread = threading.Thread(target=_pipeline_worker, daemon=True)
-    _worker_thread.start()
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    for cfg in DEFAULT_CAMERAS[:CAMERA_COUNT]:
+        try:
+            camera_manager.add_camera(enable_anpr=ENABLE_ANPR, **cfg)
+        except CameraLimitReached:
+            break
     yield
-    _stop_flag.set()
+    camera_manager.shutdown()
 
 
 app = FastAPI(title="VISION Backend", lifespan=lifespan)
@@ -151,73 +104,124 @@ app.add_middleware(
 )
 
 
-def _not_ready_response() -> JSONResponse:
-    return JSONResponse(
-        status_code=503,
-        content={"error": _session_error or "pipeline is still starting"},
-    )
+def _camera_or_404(camera_id: str):
+    cam = camera_manager.get(camera_id)
+    if cam is None:
+        raise HTTPException(status_code=404, detail=f"No camera with id '{camera_id}'")
+    return cam
 
 
+# ---------------------------------------------------------------------------
+# Global (aggregate) endpoints
+# ---------------------------------------------------------------------------
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
 
 @app.get("/status")
-def status():
-    with _lock:
-        session = _session
-        error = _session_error
-    if session is None:
-        return JSONResponse(
-            status_code=503 if error else 200,
-            content={
-                "video": False,
-                "detection": False,
-                "tracking": False,
-                "face_id": False,
-                "anpr": False,
-                "events": False,
-                "error": error,
-            },
-        )
-    return session.status
+def global_status():
+    return serialize_global_status(camera_manager)
 
 
 @app.get("/detections")
-def detections():
-    with _lock:
-        session = _session
-        result = _latest_result
-    if session is None:
-        return _not_ready_response()
-    return serialize_state(session, result)
+def global_detections():
+    return serialize_global_detections(camera_manager)
 
 
 @app.get("/events")
-def events():
-    with _lock:
-        session = _session
+def global_events():
+    return serialize_global_events(camera_manager)
+
+
+# ---------------------------------------------------------------------------
+# Camera management
+# ---------------------------------------------------------------------------
+@app.get("/cameras")
+def list_cameras():
+    return [serialize_camera_summary(cam) for cam in camera_manager.list_cameras()]
+
+
+@app.post("/cameras")
+def add_camera(camera_name: str = Form(...), video: UploadFile = File(...)):
+    ext = os.path.splitext(video.filename or "")[1].lower()
+    if ext not in ALLOWED_VIDEO_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported video type '{ext}'. Allowed: {', '.join(sorted(ALLOWED_VIDEO_EXTENSIONS))}",
+        )
+
+    # Never trust the original filename as a path/identifier.
+    stored_name = f"{uuid.uuid4().hex}{ext}"
+    stored_path = os.path.join(UPLOAD_DIR, stored_name)
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    with open(stored_path, "wb") as f:
+        f.write(video.file.read())
+
+    try:
+        cam = camera_manager.add_camera(
+            camera_name=camera_name.strip() or "Untitled Camera",
+            video_path=stored_path,
+            zones_path=None,  # no auto-calibrated zone for an arbitrary upload
+            enable_anpr=ENABLE_ANPR,
+        )
+    except CameraLimitReached as e:
+        os.remove(stored_path)
+        raise HTTPException(status_code=409, detail=str(e))
+
+    return serialize_camera_summary(cam)
+
+
+@app.delete("/cameras/{camera_id}")
+def remove_camera(camera_id: str):
+    if not camera_manager.remove_camera(camera_id):
+        raise HTTPException(status_code=404, detail=f"No camera with id '{camera_id}'")
+    return {"removed": camera_id}
+
+
+@app.post("/cameras/{camera_id}/restart")
+def restart_camera(camera_id: str):
+    if not camera_manager.restart_camera(camera_id):
+        raise HTTPException(status_code=404, detail=f"No camera with id '{camera_id}'")
+    return {"restarting": camera_id}
+
+
+# ---------------------------------------------------------------------------
+# Per-camera endpoints
+# ---------------------------------------------------------------------------
+@app.get("/cameras/{camera_id}/status")
+def camera_status(camera_id: str):
+    cam = _camera_or_404(camera_id)
+    return {
+        "camera_id": cam.camera_id,
+        "camera_name": cam.camera_name,
+        "status": cam.status,
+        "error": cam.error,
+    }
+
+
+@app.get("/cameras/{camera_id}/detections")
+def camera_detections(camera_id: str):
+    cam = _camera_or_404(camera_id)
+    session, result = cam.snapshot()
     if session is None:
-        return _not_ready_response()
-    return serialize_events(session)
+        return JSONResponse(status_code=503, content={"error": cam.error or "camera is still starting"})
+    return serialize_state(session, result)
 
 
-@app.post("/restart")
-def restart():
-    with _lock:
-        session = _session
+@app.get("/cameras/{camera_id}/events")
+def camera_events(camera_id: str):
+    cam = _camera_or_404(camera_id)
+    session, _ = cam.snapshot()
     if session is None:
-        return _not_ready_response()
-    _restart_flag.set()
-    return {"restarting": True}
+        return JSONResponse(status_code=503, content={"error": cam.error or "camera is still starting"})
+    return serialize_events(session, cam.camera_id, cam.camera_name)
 
 
-def _mjpeg_generator():
+def _mjpeg_generator(cam):
     boundary = b"--frame"
     while True:
-        with _lock:
-            jpeg = _latest_jpeg
+        jpeg = cam.latest_jpeg()
         if jpeg is not None:
             yield (
                 boundary
@@ -227,12 +231,13 @@ def _mjpeg_generator():
                 + jpeg
                 + b"\r\n"
             )
-        time.sleep(STREAM_POLL_INTERVAL_S)
+        time.sleep(JPEG_STREAM_POLL_INTERVAL_S)
 
 
-@app.get("/stream")
-def stream():
+@app.get("/cameras/{camera_id}/stream")
+def camera_stream(camera_id: str):
+    cam = _camera_or_404(camera_id)
     return StreamingResponse(
-        _mjpeg_generator(),
+        _mjpeg_generator(cam),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )

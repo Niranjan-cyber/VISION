@@ -49,7 +49,7 @@ If you already have these files locally (e.g. from a teammate), just drop them i
 
 ## 4. Demo video assets
 
-Demo videos live in `data/videos/` and are **also gitignored** — they ship with the team's working copy but not with a fresh clone. The **official golden demo video is `data/videos/shreyas1.mp4`** (calibrated zone below assumes this exact clip). If you don't have it, any short clip of an enrolled person standing in frame will work, but you'll need to recalibrate `configs/zones_demo.yaml` for its resolution/framing (see the notes inside that file).
+Demo videos live in `data/videos/` and are **also gitignored** — they ship with the team's working copy but not with a fresh clone. The default 4-camera dashboard needs four specific clips: `shreyas1.mp4`, `jaysingpure1.mp4`, `sample1.mp4`, `salman4.mp4` (see the camera table in §7 for which zone file pairs with each). If you're missing some of these, set `VISION_CAMERA_COUNT=1` to run just the original single-camera golden demo (`shreyas1.mp4`), or upload your own videos as additional cameras from the dashboard once it's running.
 
 ## 5. Face gallery setup
 
@@ -59,22 +59,43 @@ Enrolled identities live in `data/face_gallery/<Identity_Name>/*.jpg` (also giti
 
 `configs/zones_demo.yaml` is calibrated specifically for `shreyas1.mp4` — the subject's actual bottom-center trajectory in that clip was measured (not guessed) before drawing the polygon. **`configs/zones.yaml`** (the original Slice 7 example) is generic and does **not** reliably fire events on any of the team's demo videos — use `zones_demo.yaml` for the live demo, not `zones.yaml`.
 
-## 7. Backend startup
+## 7. Backend startup (multi-camera)
 
 ```bash
 uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
-Runs the golden demo video through the real AI pipeline in a background thread (looping automatically at end-of-stream so the dashboard stays continuously live) and exposes it over HTTP. Configurable via env vars:
+Boots up to **4 simultaneous cameras**, each an independent `PipelineSession` (own video source, own tracks, own identities, own event history) running in its own thread via `CameraManager` (`src/pipeline/camera_manager.py`). Each camera's clip loops automatically at end-of-stream. The default 4-camera lineup:
+
+| Camera | Video | Zones |
+| :--- | :--- | :--- |
+| CAM-01 "Border Gate" (the original golden demo) | `data/videos/shreyas1.mp4` | `configs/zones_demo.yaml` |
+| CAM-02 "BOP East" | `data/videos/jaysingpure1.mp4` | `configs/zones_cam02.yaml` |
+| CAM-03 "Perimeter Road" | `data/videos/sample1.mp4` | `configs/zones_cam03.yaml` |
+| CAM-04 "Restricted Zone" | `data/videos/salman4.mp4` | `configs/zones_cam04.yaml` |
+
+Configurable via env vars:
 
 | Env var | Default | Purpose |
 | :--- | :--- | :--- |
-| `VISION_DEMO_VIDEO` | `data/videos/shreyas1.mp4` | Video the dashboard streams |
-| `VISION_DEMO_ZONES` | `configs/zones_demo.yaml` | Zone config for event detection |
-| `VISION_LOITERING_DURATION` | `3.0` | Seconds before `LOITERING` fires (short, because the golden clip is only ~4.3s of video) |
-| `VISION_ENABLE_ANPR` | `false` | See ANPR note below — do not set `true` without first installing and validating `easyocr` |
+| `VISION_CAMERA_COUNT` | `4` | How many of the 4 default cameras to boot (`1` restores the original single-camera golden demo, and is what the test suite uses for a fast boot) |
+| `VISION_CAM01_NAME` / `VISION_DEMO_VIDEO` / `VISION_DEMO_ZONES` | see above | Override CAM-01 specifically |
+| `VISION_LOITERING_DURATION` | `3.0` | CAM-01's loitering duration (short, because that clip is only ~4.3s of video) |
+| `VISION_ENABLE_ANPR` | `false` | Applies to every camera — see ANPR note below |
 
-Endpoints: `GET /health`, `GET /status`, `GET /detections`, `GET /events`, `GET /stream` (MJPEG), `POST /restart`.
+**Endpoints:**
+
+| | |
+| :--- | :--- |
+| `GET /health` | liveness check |
+| `GET /status` `GET /detections` `GET /events` | **global aggregate** across every active camera |
+| `GET /cameras` | list all cameras + their summaries |
+| `POST /cameras` | add a camera — multipart form, fields `camera_name` + `video` (file); rejects a 5th active camera with `409 Maximum 4 active camera streams reached.`; never trusts the original filename (stored under `data/uploads/<uuid>.<ext>`) |
+| `DELETE /cameras/{id}` | remove a camera and free its slot |
+| `POST /cameras/{id}/restart` | restart one camera (reopens its video, resets its own tracks/identities/events — every other camera is untouched) |
+| `GET /cameras/{id}/status` `GET /cameras/{id}/detections` `GET /cameras/{id}/events` `GET /cameras/{id}/stream` | per-camera versions of the above |
+
+A camera pointed at a bad/corrupt video reports `status: "error"` with a message and keeps the other 3 cameras running — one camera's failure never crashes the process or another camera (see `tests/test_camera_manager.py::TestCameraFailureIsolation`).
 
 ## 8. Frontend startup
 
@@ -98,7 +119,7 @@ or simply run [`run_demo.ps1`](run_demo.ps1) on Windows, which runs the exact sa
 
 ## 10. Expected behavior
 
-On the golden demo video you should see: a person detected and tracked (persistent `track_id`), a face detected and recognized as **Shreyas_Chavan** (~71% similarity), an `INTRUSION` alert (HIGH) fire almost immediately once the person is in the marked zone, and a `LOITERING` alert (MEDIUM) fire ~3 seconds later. No vehicles/plates will appear — the golden clip has none, and ANPR is off by default (see below). The console should show **no** PostgreSQL connection errors unless you explicitly pass a `--db-uri`.
+On the dashboard's default 4-camera boot you should see all 4 tiles reach `LIVE` within ~20s, each with its own annotated stream. **CAM-01** and **CAM-02** each show one recognized identity (`Shreyas_Chavan` ~71%, `Atharva_Jaysingpure` ~69-78%) and fire `INTRUSION` + `LOITERING`. **CAM-03** and **CAM-04** show multiple simultaneous person tracks (unenrolled — expect `NOT RECOGNIZED`) and fire many more events, including `UNKNOWN_PERSON_INTRUSION`, since several different people cycle through their zones. No vehicles/plates will appear on any camera — ANPR is off by default (see below). The console should show **no** PostgreSQL connection errors unless you explicitly pass a `--db-uri`. Click any camera tile to open its focused view (large video, that camera's own alerts, its own person/vehicle tables); use **← All Cameras** to return to the grid.
 
 ---
 
@@ -113,17 +134,20 @@ ANPR is **disabled by default** for the live demo (`VISION_ENABLE_ANPR=false`, `
 - Video ingestion, YOLO11n detection, ByteTrack tracking, YuNet face detection, InsightFace W600K-R50 recognition (Slices 1–5.7)
 - ANPR pipeline (detector/enhancer/OCR/consensus) — implemented but **off by default** for the demo (see above)
 - Event Intelligence & Alert Engine: `INTRUSION`, `UNKNOWN_PERSON_INTRUSION`, `LOITERING`, `SUSPICIOUS_VEHICLE`, zone geometry, deduplication (Slice 7)
-- FastAPI backend (`backend/main.py`) serving the real pipeline's live state as JSON + MJPEG — no mock/parallel implementation
-- React + Vite dashboard: live annotated video, persons/vehicles panels, security alerts panel, honest system-status indicators
-- A calibrated, verified-working golden demo video/zone combination
+- **Multi-camera orchestration (Phase 2)**: up to 4 simultaneous, fully isolated `PipelineSession`s via `CameraManager`; add a camera by uploading a video from the dashboard; remove/restart per camera; one camera's failure never affects another or crashes the process
+- FastAPI backend (`backend/main.py`) serving per-camera and global-aggregate live state as JSON + per-camera MJPEG — no mock/parallel implementation
+- React + Vite dashboard: 4-camera grid (hero), click-to-focus single-camera view, global alerts/stats/event timeline tagged by camera, camera management (add/remove/restart), honest per-camera status indicators
+- A calibrated, verified-working golden 4-camera video/zone lineup (see §7)
 
 ## FUTURE / PLANNED
 
-- Production authentication, multi-camera orchestration, cloud deployment, WebRTC, message queues/Kafka/Redis — intentionally **not** built; out of scope for this MVP
+- Production authentication, cloud deployment, WebRTC, message queues/Kafka/Redis, Kubernetes/GPU orchestration — intentionally **not** built; out of scope for this MVP
+- Real IP camera/RTSP ingestion — only local video files are supported; `VideoSource`/`PipelineSession` would need a new source abstraction for it
 - PostgreSQL persistence exists (`src/face/vector_db.py`) but is optional and off by default; not required for the dashboard
 - Adaptive/quality-aware face-recognition thresholds (documented as a known limitation in `docs/PROJECT_SUMMARY.md`, not implemented)
 - Verified ANPR with a real OCR engine on a confirmed-legible plate
-- Interactive alert Acknowledge/Resolve controls, multi-camera selection, historical event search — specified as future scope in [docs/DASHBOARD_DESIGN_SPEC.md](docs/DASHBOARD_DESIGN_SPEC.md#10-ui-element--backend-data-mapping); each would require a new backend endpoint that doesn't exist today
+- Interactive alert Acknowledge/Resolve controls, historical event search/archive — the `status` field is already returned for display; changing it needs a new `POST` endpoint that doesn't exist today
+- Per-camera zone upload in the Add Camera flow — an uploaded video currently runs with no zone file (no event detection) until one is added manually to `configs/` and the camera is reconfigured
 
 ---
 
@@ -132,4 +156,4 @@ ANPR is **disabled by default** for the live demo (`VISION_ENABLE_ANPR=false`, `
 ```bash
 python -m unittest discover -s tests
 ```
-142 tests pass (the original 129 covering the AI pipeline modules, plus 13 added for the pipeline-session refactor, the API serialization contract, and a live FastAPI smoke test — see `tests/test_pipeline_session.py`, `tests/test_pipeline_serialize.py`, `tests/test_backend_api.py`).
+172 tests pass (the original 129 covering the AI pipeline modules, 13 added for the single-camera pipeline-session refactor and API contract, and 30 more added for multi-camera orchestration — camera creation/removal, the 4-camera limit, cross-camera isolation, restart, upload validation, and failure isolation. See `tests/test_pipeline_session.py`, `tests/test_pipeline_serialize.py`, `tests/test_backend_api.py`, `tests/test_camera_manager.py`).

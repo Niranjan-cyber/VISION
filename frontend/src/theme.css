@@ -1,20 +1,21 @@
 :root {
-  --bg: #0a0f1a;
-  --panel: #10182b;
-  --panel-alt: #131d33;
-  --border: #223049;
-  --border-soft: #1a2438;
-  --text: #e6ebf5;
-  --text-dim: #8b98b3;
-  --text-faint: #5c6b87;
-  --accent: #38bdf8;
-  --accent-dim: #1c5a75;
-  --success: #34d399;
-  --warning: #fbbf24;
-  --high: #f87171;
+  /* Exact palette mandated for the multi-camera command center (Phase 2 §18). */
+  --bg: #0f172a;
+  --panel: #1e293b;
+  --panel-alt: #182234;
+  --border: #2a3a52;
+  --border-soft: #1f2c40;
+  --text: #e8edf7;
+  --text-dim: #93a1bf;
+  --text-faint: #5d6b8a;
+  --accent: #2563eb;
+  --accent-dim: #1e3a6e;
+  --success: #22c55e;
+  --warning: #f59e0b;
+  --high: #ef4444;
   --critical: #ef4444;
-  --mono: "SFMono-Regular", "Consolas", "Liberation Mono", Menlo, monospace;
-  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: "IBM Plex Mono", "SFMono-Regular", "Consolas", "Liberation Mono", Menlo, monospace;
+  --sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
 * {

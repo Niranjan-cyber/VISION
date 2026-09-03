@@ -45,6 +45,8 @@ data/videos/*
 !data/videos/.gitkeep
 data/face_gallery/*
 !data/face_gallery/.gitkeep
+data/uploads/*
+!data/uploads/.gitkeep
 *.mp4
 *.avi
 *.mov

@@ -1,0 +1,20 @@
+# VISION — Zone configuration for CAM-04 "Restricted Zone"
+# Video: data/videos/salman4.mp4 (384x832)
+#
+# Negative-control clip (unenrolled identities — used elsewhere in the
+# project as the face-recognition false-accept benchmark). 2-4 simultaneous
+# person tracks with real motion, y range roughly 400-720 across the clip
+# (verified via a live frame-by-frame trajectory check). Zone covers the
+# lower ~55% of the frame with margin to reliably catch multiple tracks.
+
+zones:
+  - id: restricted_zone_cam04
+    name: Restricted Zone
+    type: restricted
+    polygon:
+      - [0, 380]
+      - [384, 380]
+      - [384, 832]
+      - [0, 832]
+    metadata:
+      description: "Golden demo zone for salman4.mp4 — lower ~55% of frame, sized to catch multiple simultaneous person tracks."

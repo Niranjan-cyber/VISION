@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import type { AlertItem, DetectionState, SystemStatus } from "./types";
+import type {
+  AlertItem,
+  CameraDetectionState,
+  CameraSummary,
+  GlobalDetections,
+  GlobalStatus,
+} from "./types";
 
 // Same-origin by default (works when the backend serves the build), override
 // for local dev against a separately-running backend.
@@ -9,7 +15,7 @@ async function getJSON<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`);
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error ?? `${res.status} ${res.statusText}`);
+    throw new Error(body.detail ?? body.error ?? `${res.status} ${res.statusText}`);
   }
   return res.json();
 }
@@ -51,22 +57,57 @@ function usePolling<T>(path: string, intervalMs: number) {
   return { data, connected };
 }
 
-export function useDetections(intervalMs = 500) {
-  return usePolling<DetectionState>("/detections", intervalMs);
+// Polling intervals are deliberately modest with 4 cameras in view — four
+// MJPEG streams already carry the "live" feel; JSON polling only needs to
+// keep panels reasonably fresh, not frame-accurate.
+export function useGlobalDetections(intervalMs = 700) {
+  return usePolling<GlobalDetections>("/detections", intervalMs);
 }
 
-export function useEvents(intervalMs = 1000) {
+export function useGlobalEvents(intervalMs = 1200) {
   return usePolling<AlertItem[]>("/events", intervalMs);
 }
 
-export function useSystemStatus(intervalMs = 2000) {
-  return usePolling<SystemStatus>("/status", intervalMs);
+export function useGlobalStatus(intervalMs = 2000) {
+  return usePolling<GlobalStatus>("/status", intervalMs);
 }
 
-export function streamUrl(): string {
-  return `${API_BASE}/stream`;
+export function useCameraList(intervalMs = 2000) {
+  return usePolling<CameraSummary[]>("/cameras", intervalMs);
 }
 
-export async function restartDemo(): Promise<void> {
-  await fetch(`${API_BASE}/restart`, { method: "POST" });
+export function cameraStreamUrl(cameraId: string): string {
+  return `${API_BASE}/cameras/${encodeURIComponent(cameraId)}/stream`;
+}
+
+export async function restartCamera(cameraId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/cameras/${encodeURIComponent(cameraId)}/restart`, { method: "POST" });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail ?? "restart failed");
+}
+
+export async function removeCamera(cameraId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/cameras/${encodeURIComponent(cameraId)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail ?? "remove failed");
+}
+
+export async function addCamera(cameraName: string, file: File): Promise<CameraSummary> {
+  const form = new FormData();
+  form.append("camera_name", cameraName);
+  form.append("video", file);
+  const res = await fetch(`${API_BASE}/cameras`, { method: "POST", body: form });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(body.detail ?? "failed to add camera");
+  }
+  return body as CameraSummary;
+}
+
+/** Pulls one camera's slice out of the already-polled global detections
+ * payload — focus mode reuses this instead of opening a second poll loop. */
+export function findCameraDetections(
+  global: GlobalDetections | null,
+  cameraId: string
+): CameraDetectionState | null {
+  if (!global) return null;
+  return global.cameras.find((c) => c.camera_id === cameraId) ?? null;
 }

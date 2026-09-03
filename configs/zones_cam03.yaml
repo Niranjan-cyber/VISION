@@ -1,0 +1,20 @@
+# VISION — Zone configuration for CAM-03 "Perimeter Road"
+# Video: data/videos/sample1.mp4 (1920x1080)
+#
+# This clip has genuine multi-person walking motion and vehicle traffic
+# (verified via a live frame-by-frame trajectory check — see the session
+# notes for the raw positions). Zone covers the lower-center band where a
+# recurring track sits for most of the clip (observed x range ~852-1181,
+# y range ~1074-1080), with margin.
+
+zones:
+  - id: perimeter_road_zone
+    name: Perimeter Road Zone
+    type: restricted
+    polygon:
+      - [600, 930]
+      - [1350, 930]
+      - [1350, 1080]
+      - [600, 1080]
+    metadata:
+      description: "Golden demo zone for sample1.mp4 — lower-center band, calibrated to the recurring near-camera track."

@@ -1,0 +1,19 @@
+# VISION — Zone configuration for CAM-02 "BOP East"
+# Video: data/videos/jaysingpure1.mp4 (480x864)
+#
+# Calibrated against the actual measured bottom-center trajectory of the
+# subject in this clip (clustered around x:239-257, y:855-862 for the full
+# ~6.6s clip, same static-subject framing as CAM-01) — verified via a live
+# frame-by-frame trajectory check, not guessed.
+
+zones:
+  - id: bop_east_entry_zone
+    name: BOP East Entry Zone
+    type: restricted
+    polygon:
+      - [90, 660]
+      - [390, 660]
+      - [390, 864]
+      - [90, 864]
+    metadata:
+      description: "Golden demo zone for jaysingpure1.mp4 — bottom band where the subject stands throughout the clip."

@@ -1,48 +1,37 @@
-import { useState } from "react";
-import { restartDemo } from "../api";
-import type { SystemStatus } from "../types";
+import type { GlobalStatus } from "../types";
 
 interface Props {
-  status: SystemStatus | null;
+  status: GlobalStatus | null;
   connected: boolean;
 }
 
 export default function Header({ status, connected }: Props) {
-  const [restarting, setRestarting] = useState(false);
+  const cameraStatuses = status ? Object.values(status.cameras) : [];
+  const onlineCount = cameraStatuses.filter((c) => c.status === "online").length;
+  const anyError = cameraStatuses.some((c) => c.status === "error");
 
-  // ANPR being off is a deliberate, honest state for this demo — not a
-  // degraded system. Core perception subsystems must all be up for "online".
-  const online =
-    connected &&
-    !!status &&
-    status.video &&
-    status.detection &&
-    status.tracking &&
-    status.face_id &&
-    status.events;
-
-  const label = !connected ? "CONNECTING..." : online ? "SYSTEM ONLINE" : "SYSTEM DEGRADED";
-  const dotClass = !connected ? "dot-warn" : online ? "dot-ok" : "dot-warn";
-
-  async function handleRestart() {
-    setRestarting(true);
-    try {
-      await restartDemo();
-    } finally {
-      window.setTimeout(() => setRestarting(false), 1500);
-    }
-  }
+  const online = connected && !!status && status.cameras_active > 0 && onlineCount === status.cameras_active;
+  const label = !connected
+    ? "CONNECTING..."
+    : online
+    ? "SYSTEM ONLINE"
+    : anyError
+    ? "SYSTEM DEGRADED"
+    : "STARTING";
+  const dotClass = !connected ? "dot-warn" : online ? "dot-ok" : anyError ? "dot-bad" : "dot-warn";
 
   return (
     <header className="app-header">
       <div>
         <div className="brand">VISION</div>
-        <div className="tagline">INTELLIGENT BORDER SURVEILLANCE</div>
+        <div className="tagline">MULTI-CAMERA BORDER SURVEILLANCE</div>
       </div>
       <div className="header-actions">
-        <button className="restart-btn" onClick={handleRestart} disabled={restarting || !connected}>
-          {restarting ? "Restarting…" : "Restart Demo"}
-        </button>
+        {status && (
+          <span className="cameras-online-tag mono">
+            {onlineCount}/{status.cameras_active} cameras online
+          </span>
+        )}
         <div className="status-pill">
           <span className={`dot ${dotClass}`} />
           {label}
