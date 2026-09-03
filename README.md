@@ -10,6 +10,7 @@ This is an SIH hackathon MVP, not a production system. See **IMPLEMENTED NOW vs.
 
 - 📄 [docs/PROJECT_SUMMARY.md](docs/PROJECT_SUMMARY.md) — slice-by-slice history and benchmark metrics.
 - 📄 [docs/VISION_PRD.md](docs/VISION_PRD.md) — the original PRD. **Describes a target architecture (SCRFD, LPRNet, etc.) that differs from what is actually implemented** (YuNet, custom ANPR) — treat it as a roadmap, not as documentation of current behavior.
+- 📄 [docs/DASHBOARD_DESIGN_SPEC.md](docs/DASHBOARD_DESIGN_SPEC.md) — the dashboard/architecture/event-flow design specification for the next implementation pass (design-only, build target, not yet built).
 - 📄 [configs/zones_demo.yaml](configs/zones_demo.yaml) — the calibrated golden demo zone, with notes on how it was derived.
 
 ---
@@ -122,6 +123,7 @@ ANPR is **disabled by default** for the live demo (`VISION_ENABLE_ANPR=false`, `
 - PostgreSQL persistence exists (`src/face/vector_db.py`) but is optional and off by default; not required for the dashboard
 - Adaptive/quality-aware face-recognition thresholds (documented as a known limitation in `docs/PROJECT_SUMMARY.md`, not implemented)
 - Verified ANPR with a real OCR engine on a confirmed-legible plate
+- Interactive alert Acknowledge/Resolve controls, multi-camera selection, historical event search — specified as future scope in [docs/DASHBOARD_DESIGN_SPEC.md](docs/DASHBOARD_DESIGN_SPEC.md#10-ui-element--backend-data-mapping); each would require a new backend endpoint that doesn't exist today
 
 ---
 
