@@ -74,6 +74,10 @@ CAMERA_COUNT = int(os.environ.get("VISION_CAMERA_COUNT", "4"))
 # ANPR defaults OFF everywhere: no shipped video has a verified-legible plate,
 # and easyocr isn't installed — see docs/README ANPR decision notes.
 ENABLE_ANPR = os.environ.get("VISION_ENABLE_ANPR", "false").strip().lower() == "true"
+# 'auto' (default) uses CUDA if torch/onnxruntime actually confirm it's available,
+# else CPU. 'cuda' forces the attempt (still falls back to CPU with a warning if
+# unavailable — see src/core/device.py). 'cpu' forces CPU regardless of hardware.
+DEVICE = os.environ.get("VISION_DEVICE", "auto").strip().lower()
 
 UPLOAD_DIR = "data/uploads"
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv"}
@@ -87,7 +91,7 @@ async def lifespan(app: FastAPI):
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     for cfg in DEFAULT_CAMERAS[:CAMERA_COUNT]:
         try:
-            camera_manager.add_camera(enable_anpr=ENABLE_ANPR, **cfg)
+            camera_manager.add_camera(enable_anpr=ENABLE_ANPR, device=DEVICE, **cfg)
         except CameraLimitReached:
             break
     yield
@@ -164,6 +168,7 @@ def add_camera(camera_name: str = Form(...), video: UploadFile = File(...)):
             video_path=stored_path,
             zones_path=None,  # no auto-calibrated zone for an arbitrary upload
             enable_anpr=ENABLE_ANPR,
+            device=DEVICE,
         )
     except CameraLimitReached as e:
         os.remove(stored_path)

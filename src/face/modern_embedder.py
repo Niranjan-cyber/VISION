@@ -7,6 +7,7 @@ from typing import Optional
 import numpy as np
 import onnxruntime as ort
 
+from src.core.device import resolve_ort_providers
 from src.core.types import FaceEmbedding
 from src.face.w600k_preprocessing import preprocess_w600k_crop
 
@@ -51,8 +52,9 @@ class W600KR50Embedder:
     Extracts 512-dimensional L2-normalized identity embeddings.
     """
 
-    def __init__(self, model_path: str = "models/w600k_r50.onnx") -> None:
+    def __init__(self, model_path: str = "models/w600k_r50.onnx", device: str = "auto") -> None:
         self.model_path = model_path
+        self.device_pref = device
 
         if not os.path.exists(self.model_path):
             _download_w600k_r50(self.model_path)
@@ -62,11 +64,44 @@ class W600KR50Embedder:
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         options.intra_op_num_threads = 2
 
+        requested_providers = resolve_ort_providers(device)
+        provider_options = None
+        if "CUDAExecutionProvider" in requested_providers:
+            # Four camera sessions may each hold a CUDA session concurrently on
+            # a laptop GPU — cap each session's arena instead of letting
+            # onnxruntime's default grow-as-needed allocator claim VRAM
+            # unbounded. kSameAsRequested (rather than the default
+            # kNextPowerOfTwo) avoids over-allocating on the very first call.
+            provider_options = [
+                {
+                    "device_id": 0,
+                    "arena_extend_strategy": "kSameAsRequested",
+                    "gpu_mem_limit": 1 * 1024 * 1024 * 1024,  # 1GB ceiling per session
+                },
+                {},
+            ]
+
         self.session = ort.InferenceSession(
             self.model_path,
             sess_options=options,
-            providers=["CPUExecutionProvider"],
+            providers=requested_providers,
+            provider_options=provider_options,
         )
+
+        # onnxruntime silently falls back to CPU if the CUDA provider fails to
+        # initialize (e.g. missing cuDNN/cuBLAS DLLs) — never trust the
+        # requested provider list, always check what was actually granted.
+        self.active_providers = self.session.get_providers()
+        self.active_provider = self.active_providers[0] if self.active_providers else "CPUExecutionProvider"
+        if "CUDAExecutionProvider" in requested_providers and self.active_provider != "CUDAExecutionProvider":
+            print(
+                f"[WARNING] CUDAExecutionProvider was requested for face recognition but "
+                f"onnxruntime granted {self.active_provider} instead (session.get_providers()="
+                f"{self.active_providers}) — running on CPU.",
+                file=sys.stderr,
+            )
+        else:
+            print(f"[INFO] Face recognition (W600K-R50) execution provider: {self.active_provider}", file=sys.stderr)
 
         inputs = self.session.get_inputs()
         outputs = self.session.get_outputs()

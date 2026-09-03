@@ -20,6 +20,7 @@ from typing import Dict, List, Optional, Set
 import cv2
 import numpy as np
 
+from src.core.device import print_hardware_banner
 from src.core.types import (
     BoundingBox,
     Detection,
@@ -119,11 +120,13 @@ class PipelineSession:
         debug_face_matching: bool = False,
         debug_face_alignment: bool = False,
         debug_face_crops: bool = False,
+        device: str = "auto",
         verbose: bool = True,
     ):
         self.video_path = video_path
         self.model_name = model
         self.confidence = confidence
+        self.device_pref = device
         self.face_confidence = face_confidence
         self.face_threshold = face_threshold
         self.face_margin = face_margin
@@ -163,7 +166,7 @@ class PipelineSession:
 
         # 2. YOLODetector
         try:
-            self.detector = YOLODetector(model_name=model, confidence_threshold=confidence)
+            self.detector = YOLODetector(model_name=model, confidence_threshold=confidence, device=device)
         except Exception as e:
             self.source.release()
             raise PipelineSubsystemError("detection", str(e)) from e
@@ -185,7 +188,7 @@ class PipelineSession:
         # 5. FaceEmbedder
         try:
             if face_model == "w600k_r50":
-                self.face_embedder = W600KR50Embedder(model_path="models/w600k_r50.onnx")
+                self.face_embedder = W600KR50Embedder(model_path="models/w600k_r50.onnx", device=device)
             elif arcface_backend == "opencv":
                 self.face_embedder = OpenCVArcFaceEmbedder()
             else:
@@ -193,6 +196,9 @@ class PipelineSession:
         except Exception as e:
             self.source.release()
             raise PipelineSubsystemError("face_id", str(e)) from e
+
+        face_provider_label = getattr(self.face_embedder, "active_provider", "CPUExecutionProvider")
+        print_hardware_banner(device, self.detector.device, face_provider_label)
 
         # 6. FaceGallery & FaceMatcher
         try:

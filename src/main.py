@@ -29,9 +29,10 @@ CLASS_COLORS: Dict[str, Tuple[int, int, int]] = {
     "motorcycle": (255, 255, 0), # Cyan
     "bicycle": (0, 255, 255),    # Bright Yellow
 }
-FACE_KNOWN_COLOR = (0, 255, 127)   # Spring Green for recognized identity match
-FACE_UNKNOWN_COLOR = (255, 0, 255) # Magenta for unknown / unassociated face
-FACE_FLAGGED_COLOR = (0, 0, 255)   # Red for flagged / unrecognized intruder
+FACE_KNOWN_COLOR = (0, 255, 127)    # Spring Green for a recognized identity match
+FACE_UNKNOWN_COLOR = (255, 0, 255)  # Magenta for an unassociated face (no track yet)
+FACE_NOMATCH_COLOR = (0, 0, 255)    # Red for a face that was evaluated and did NOT match the gallery
+FACE_PENDING_COLOR = (0, 215, 255)  # Amber for a face associated with a track whose recognition hasn't completed yet
 DEFAULT_COLOR = (200, 200, 200)
 
 
@@ -96,10 +97,10 @@ def draw_annotations(
         if trk.class_name == "person":
             match_info = track_identity_map.get(trk.track_id)
             if match_info is not None:
-                if match_info.is_match:
-                    color = FACE_KNOWN_COLOR  # Green for valid/authorized
-                else:
-                    color = FACE_FLAGGED_COLOR  # Red for FLAGGED/unauthorized
+                # Only color the box once recognition has actually been evaluated
+                # for this track — a track with no result yet keeps the default
+                # person color rather than being colored as if it already failed.
+                color = FACE_KNOWN_COLOR if match_info.is_match else FACE_NOMATCH_COLOR
             label = f"{trk.class_name} #{trk.track_id} {trk.confidence:.2f}"
         elif trk.class_name in TARGET_VEHICLE_CLASSES and track_plate_map and trk.track_id in track_plate_map:
             p_rec = track_plate_map[trk.track_id]
@@ -155,13 +156,18 @@ def draw_annotations(
         assoc_track_id = associated_map.get(id(face))
         match_info = track_identity_map.get(assoc_track_id) if assoc_track_id is not None else None
 
+        # Three genuinely distinct states — never collapsed into one "FLAGGED"
+        # label: a track whose recognition hasn't run yet is not the same as
+        # one that ran and didn't match the gallery.
         if match_info is not None and match_info.is_match:
             box_color = FACE_KNOWN_COLOR
-            face_label = f"face -> #{assoc_track_id} | {match_info.identity} ({match_info.similarity:.2f})"
+            face_label = f"face -> #{assoc_track_id} | KNOWN: {match_info.identity} ({match_info.similarity:.2f})"
+        elif match_info is not None:
+            box_color = FACE_NOMATCH_COLOR
+            face_label = f"face -> #{assoc_track_id} | NOT RECOGNIZED ({match_info.similarity:.2f})"
         elif assoc_track_id is not None:
-            box_color = FACE_FLAGGED_COLOR
-            sim_str = f" ({match_info.similarity:.2f})" if match_info is not None else ""
-            face_label = f"face -> #{assoc_track_id} | FLAGGED{sim_str}"
+            box_color = FACE_PENDING_COLOR
+            face_label = f"face -> #{assoc_track_id} | RECOGNIZING..."
         else:
             box_color = FACE_UNKNOWN_COLOR
             face_label = f"face {face.confidence:.2f}"
@@ -459,6 +465,14 @@ def parse_args():
         default=15.0,
         help="Displacement threshold in pixels below which an object is considered stationary (default: 15.0)",
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        choices=["auto", "cuda", "cpu"],
+        default="auto",
+        help="Compute device for YOLO detection and face recognition (default: auto — CUDA if available, else CPU). "
+        "YuNet face detection and ByteTrack/EventEngine always run on CPU regardless of this flag.",
+    )
     return parser.parse_args()
 
 
@@ -491,6 +505,7 @@ def main():
     print(f" Debug Matching      : {args.debug_face_matching}")
     print(f" Debug Alignment     : {args.debug_face_alignment}")
     print(f" Inference Interval  : Every {args.interval} frame(s)")
+    print(f" Device              : {args.device}")
     print("==================================================")
 
     # Build the shared pipeline session (video ingestion, detection, tracking,
@@ -520,6 +535,7 @@ def main():
             debug_face_matching=args.debug_face_matching,
             debug_face_alignment=args.debug_face_alignment,
             debug_face_crops=args.debug_face_crops,
+            device=args.device,
             verbose=True,
         )
     except PipelineSubsystemError as e:

@@ -61,6 +61,7 @@ class CameraConfig:
     stationary_duration: float = 60.0
     movement_threshold: float = 15.0
     enable_anpr: bool = False
+    device: str = "auto"
 
 
 class CameraSession:
@@ -139,6 +140,7 @@ class CameraSession:
                 movement_threshold=self.config.movement_threshold,
                 enable_anpr=self.config.enable_anpr,
                 camera_id=self.camera_id,
+                device=self.config.device,
                 verbose=False,
             )
         except Exception as e:
@@ -243,6 +245,7 @@ class CameraManager:
         stationary_duration: float = 60.0,
         movement_threshold: float = 15.0,
         enable_anpr: bool = False,
+        device: str = "auto",
     ) -> CameraSession:
         with self._lock:
             if len(self._cameras) >= MAX_ACTIVE_CAMERAS:
@@ -264,6 +267,7 @@ class CameraManager:
                 stationary_duration=stationary_duration,
                 movement_threshold=movement_threshold,
                 enable_anpr=enable_anpr,
+                device=device,
             )
             session = CameraSession(config)  # spawns its own thread; safe under this lock
             self._cameras[camera_id] = session

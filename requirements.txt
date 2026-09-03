@@ -1,3 +1,7 @@
+# CPU-only, portable install (works with no NVIDIA GPU). For optional CUDA
+# acceleration (YOLO detection + face recognition on GPU), do NOT edit this
+# file — follow docs/GPU_SETUP.md instead, which installs a CUDA build of
+# torch and replaces onnxruntime with onnxruntime-gpu in your venv.
 ultralytics>=8.3.0
 opencv-python>=4.8.0
 numpy>=1.24.0

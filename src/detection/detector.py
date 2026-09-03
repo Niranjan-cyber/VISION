@@ -2,6 +2,7 @@ import sys
 from typing import List, Optional, Set
 import numpy as np
 
+from src.core.device import resolve_yolo_device
 from src.core.types import BoundingBox, Detection
 
 
@@ -21,9 +22,12 @@ class YOLODetector:
         self,
         model_name: str = "yolo11n.pt",
         confidence_threshold: float = 0.25,
+        device: str = "auto",
     ):
         self.model_name = model_name
         self.confidence_threshold = confidence_threshold
+        self.device_pref = device
+        self.device = resolve_yolo_device(device)
         self.model = None
         self._load_model()
 
@@ -41,6 +45,7 @@ class YOLODetector:
 
         try:
             self.model = YOLO(self.model_name)
+            self.model.to(self.device)
         except Exception as e:
             print(
                 f"[ERROR] Failed to load YOLO model '{self.model_name}': {e}",
@@ -71,6 +76,7 @@ class YOLODetector:
         results = self.model.predict(
             source=frame,
             conf=threshold,
+            device=self.device,
             verbose=False,
         )
 
