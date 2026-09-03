@@ -158,6 +158,15 @@ Vehicle Tracks                    Person Tracks (class_name == "person")
 - Proved that Max-Gallery similarity outperforms Mean-Prototype similarity.
 - Proved that cross-environment genuine similarity is **$0.40 – 0.52$** while negative control impostors **never exceed $0.11$**.
 
+### Vertical Slice 6.0: ANPR & Vehicle Intelligence Engine
+- Implemented `LicensePlateDetector` in `src/anpr/detector.py` with dual-mode support: custom deep YOLO models and an offline OpenCV morphological vertical-edge/aspect-ratio contour engine.
+- Implemented `PlateEnhancer` in `src/anpr/enhancer.py` applying CLAHE contrast balancing, bilateral edge-preserving denoising, standard scaling, and angular deskewing.
+- Implemented `clean_plate_text` and `disambiguate_indian_plate` in `src/anpr/cleaner.py` enforcing Indian Standard (`^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}$`), Bharat Series (`BH`), and OCR character disambiguation (`O` vs `0`, `B` vs `8`, `I` vs `1`, `S` vs `5`, `Z` vs `2`).
+- Implemented pluggable `BasePlateOCREngine`, `EasyOCREngine`, `HeuristicPlateOCREngine`, and `MockPlateOCREngine` in `src/anpr/ocr.py`.
+- Implemented `associate_plates_to_vehicles` in `src/anpr/association.py` mapping crop-relative plate bounding boxes into global video frame coordinates.
+- Implemented `PlateTrackCache` in `src/anpr/cache.py` providing temporal confidence pooling, multi-frame majority consensus voting, and $O(1)$ track lookups.
+- Integrated full ANPR pipeline into `src/main.py` with vehicle plate badges, real-time HUD counters, and comprehensive exit telemetry.
+
 ---
 
 ## ⚠️ Current Issues & Diagnostic Findings

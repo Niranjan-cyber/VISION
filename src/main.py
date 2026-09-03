@@ -2,7 +2,7 @@ import argparse
 import os
 import sys
 import time
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 import cv2
 import numpy as np
 
@@ -12,7 +12,19 @@ from src.core.types import (
     FaceDetection,
     FaceEmbedding,
     IdentityMatch,
+    PlateDetection,
+    PlateRecognitionResult,
     Track,
+    VehiclePlateAssociation,
+)
+from src.anpr import (
+    LicensePlateDetector,
+    PlateEnhancer,
+    PlateTrackCache,
+    clean_plate_text,
+    format_indian_plate,
+    get_plate_ocr_engine,
+    map_crop_to_global_bbox,
 )
 from src.detection.detector import YOLODetector
 from src.face.alignment import align_face
@@ -29,6 +41,10 @@ from src.face.modern_embedder import W600KR50Embedder
 from src.ingestion.video import VideoSource
 from src.tracking.tracker import ByteTrackTracker
 
+# Target classes for vehicle intelligence
+TARGET_VEHICLE_CLASSES: Set[str] = {"car", "truck", "bus", "motorcycle"}
+PLATE_BOX_COLOR = (0, 215, 255)  # Amber/Gold for license plates
+
 # Color palette for object visualization (BGR format)
 CLASS_COLORS: Dict[str, Tuple[int, int, int]] = {
     "person": (0, 215, 255),     # Bright Amber/Gold
@@ -40,6 +56,7 @@ CLASS_COLORS: Dict[str, Tuple[int, int, int]] = {
 }
 FACE_KNOWN_COLOR = (0, 255, 127)   # Spring Green for recognized identity match
 FACE_UNKNOWN_COLOR = (255, 0, 255) # Magenta for unknown / unassociated face
+FACE_FLAGGED_COLOR = (0, 0, 255)   # Red for flagged / unrecognized intruder
 DEFAULT_COLOR = (200, 200, 200)
 
 
@@ -49,8 +66,10 @@ def draw_annotations(
     faces: List[FaceDetection],
     associations: List[FaceTrackAssociation],
     track_identity_map: Dict[int, IdentityMatch],
+    plates: Optional[List[PlateRecognitionResult]] = None,
+    track_plate_map: Optional[Dict[int, PlateRecognitionResult]] = None,
 ) -> np.ndarray:
-    """Renders tracked object bounding boxes, face boxes, landmarks, and identity match status indicators."""
+    """Renders tracked object bounding boxes, face boxes, landmarks, vehicle plates, and status indicators."""
     annotated = frame.copy()
     h, w = annotated.shape[:2]
 
@@ -62,6 +81,22 @@ def draw_annotations(
     # 1. Render Tracked Objects (Vehicles & Persons)
     for trk in tracks:
         color = CLASS_COLORS.get(trk.class_name, DEFAULT_COLOR)
+        
+        # Visually highlight person track status or vehicle license plate:
+        if trk.class_name == "person":
+            match_info = track_identity_map.get(trk.track_id)
+            if match_info is not None:
+                if match_info.is_match:
+                    color = FACE_KNOWN_COLOR  # Green for valid/authorized
+                else:
+                    color = FACE_FLAGGED_COLOR  # Red for FLAGGED/unauthorized
+            label = f"{trk.class_name} #{trk.track_id} {trk.confidence:.2f}"
+        elif trk.class_name in TARGET_VEHICLE_CLASSES and track_plate_map and trk.track_id in track_plate_map:
+            p_rec = track_plate_map[trk.track_id]
+            label = f"{trk.class_name} #{trk.track_id} | {format_indian_plate(p_rec.cleaned_text)}"
+        else:
+            label = f"{trk.class_name} #{trk.track_id} {trk.confidence:.2f}"
+
         bbox = trk.bbox
 
         x1 = max(0, min(bbox.x1, w - 1))
@@ -74,7 +109,6 @@ def draw_annotations(
 
         cv2.rectangle(annotated, (x1, y1), (x2, y2), color, thickness=2)
 
-        label = f"{trk.class_name} #{trk.track_id} {trk.confidence:.2f}"
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 0.5
         thickness = 1
@@ -115,9 +149,9 @@ def draw_annotations(
             box_color = FACE_KNOWN_COLOR
             face_label = f"face -> #{assoc_track_id} | {match_info.identity} ({match_info.similarity:.2f})"
         elif assoc_track_id is not None:
-            box_color = FACE_UNKNOWN_COLOR
+            box_color = FACE_FLAGGED_COLOR
             sim_str = f" ({match_info.similarity:.2f})" if match_info is not None else ""
-            face_label = f"face -> #{assoc_track_id} | Unknown{sim_str}"
+            face_label = f"face -> #{assoc_track_id} | FLAGGED{sim_str}"
         else:
             box_color = FACE_UNKNOWN_COLOR
             face_label = f"face {face.confidence:.2f}"
@@ -127,9 +161,7 @@ def draw_annotations(
         # Draw 5 facial landmarks if available
         if face.landmarks is not None:
             for pt in face.landmarks:
-                lx, ly = int(round(pt[0])), int(round(pt[1]))
-                if 0 <= lx < w and 0 <= ly < h:
-                    cv2.circle(annotated, (lx, ly), 2, (0, 255, 255), -1)
+                cv2.circle(annotated, (int(pt[0]), int(pt[1])), 2, (0, 255, 255), -1)
 
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 0.42
@@ -153,6 +185,35 @@ def draw_annotations(
             lineType=cv2.LINE_AA,
         )
 
+    # 3. Render Detected License Plates
+    if plates:
+        for plt in plates:
+            pb = plt.bbox
+            px1 = max(0, min(pb.x1, w - 1))
+            py1 = max(0, min(pb.y1, h - 1))
+            px2 = max(0, min(pb.x2, w - 1))
+            py2 = max(0, min(pb.y2, h - 1))
+            if px2 <= px1 or py2 <= py1:
+                continue
+
+            cv2.rectangle(annotated, (px1, py1), (px2, py2), PLATE_BOX_COLOR, thickness=2)
+            plt_label = f"PLATE: {format_indian_plate(plt.cleaned_text)} ({plt.confidence:.2f})"
+            (tw, th), bl = cv2.getTextSize(plt_label, cv2.FONT_HERSHEY_SIMPLEX, 0.40, 1)
+            ly1 = max(py1 - th - 4, 0)
+            ly2 = ly1 + th + 4
+            lx2 = min(px1 + tw + 6, w)
+            cv2.rectangle(annotated, (px1, ly1), (lx2, ly2), PLATE_BOX_COLOR, cv2.FILLED)
+            cv2.putText(
+                annotated,
+                plt_label,
+                (px1 + 3, ly2 - bl - 2),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.40,
+                (0, 0, 0),
+                1,
+                lineType=cv2.LINE_AA,
+            )
+
     return annotated
 
 
@@ -168,17 +229,19 @@ def draw_hud(
     faces_associated_count: int,
     embeddings_generated_count: int,
     recognized_faces_count: int,
-    unknown_faces_count: int,
+    flagged_tracks_count: int,
     recog_threshold: float,
     recog_margin: float,
     face_model_name: str,
+    vehicles_tracked_count: int = 0,
+    plates_read_count: int = 0,
 ) -> np.ndarray:
     """Draws runtime status HUD on top-left of frame."""
     hud_frame = frame.copy()
     overlay = hud_frame.copy()
 
     panel_x1, panel_y1 = 15, 15
-    panel_x2, panel_y2 = 300, 345
+    panel_x2, panel_y2 = 300, 395
 
     # Glassmorphic dark panel background
     cv2.rectangle(
@@ -199,7 +262,7 @@ def draw_hud(
     )
 
     lines = [
-        ("VISION - Slice 5.6 (Face Recog)", (0, 215, 255), 0.48, 2),
+        ("VISION - Slice 6.0 (Face + ANPR)", (0, 215, 255), 0.48, 2),
         (
             f"Frame: {current_frame} / {total_frames if total_frames > 0 else 'N/A'}",
             (220, 220, 220),
@@ -219,8 +282,10 @@ def draw_hud(
         (f"Faces Associated: {faces_associated_count}", (0, 255, 255), 0.42, 1),
         (f"Embeddings Gen: {embeddings_generated_count}", (200, 200, 200), 0.42, 1),
         (f"Recognized Faces: {recognized_faces_count}", (0, 255, 127), 0.42, 1),
-        (f"Unknown Faces: {unknown_faces_count}", (255, 0, 255), 0.42, 1),
-        (f"Model: {face_model_name}", (0, 215, 255), 0.40, 1),
+        (f"Flagged Tracks: {flagged_tracks_count}", (0, 0, 255), 0.42, 1),
+        (f"Vehicles: {vehicles_tracked_count}", (255, 144, 30), 0.42, 1),
+        (f"Plates Read: {plates_read_count}", (0, 215, 255), 0.42, 1),
+        (f"Face Model: {face_model_name}", (0, 215, 255), 0.40, 1),
         ("Alignment: 5-Point Similarity", (0, 255, 255), 0.40, 1),
         ("Embedding: 512-D L2 Norm", (200, 200, 200), 0.40, 1),
         (f"Threshold: {recog_threshold:.2f} | Margin: {recog_margin:.2f}", (200, 200, 200), 0.40, 1),
@@ -245,7 +310,7 @@ def draw_hud(
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="VISION Vertical Slice 5.6 - Face Recognition & Identity Matching Pipeline"
+        description="VISION Vertical Slice 6.0 - Face Recognition & ANPR Vehicle Intelligence Pipeline"
     )
     parser.add_argument(
         "--video",
@@ -282,6 +347,12 @@ def parse_args():
         type=str,
         default="data/face_gallery",
         help="Path to face gallery directory (default: data/face_gallery)",
+    )
+    parser.add_argument(
+        "--db-uri",
+        type=str,
+        default=os.environ.get("VISION_DB_URI", os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/vision_db")),
+        help="PostgreSQL connection URI (default: read from VISION_DB_URI/DATABASE_URL or postgresql://postgres:postgres@localhost:5432/vision_db)",
     )
     parser.add_argument(
         "--interval",
@@ -324,6 +395,24 @@ def parse_args():
         action="store_true",
         help="Save raw extracted face crop images to scratch/debug_face_crops/ for visual inspection",
     )
+    parser.add_argument(
+        "--disable-anpr",
+        action="store_true",
+        help="Disable automatic number plate recognition on vehicle tracks",
+    )
+    parser.add_argument(
+        "--plate-model",
+        type=str,
+        default=None,
+        help="Path to custom YOLO license plate detection model weights (.pt or .onnx)",
+    )
+    parser.add_argument(
+        "--ocr-engine",
+        type=str,
+        choices=["auto", "easyocr", "heuristic", "mock"],
+        default="auto",
+        help="OCR engine for license plate text extraction (default: auto)",
+    )
     return parser.parse_args()
 
 
@@ -333,10 +422,13 @@ def main():
     model_display_name = "InsightFace W600K-R50" if args.face_model == "w600k_r50" else f"ArcFace R100 ({args.arcface_backend})"
 
     print("==================================================")
-    print("       VISION — Vertical Slice 5.6 Pipeline       ")
+    print("       VISION — Vertical Slice 6.0 Pipeline       ")
     print("==================================================")
     print(f" Video Path          : {args.video}")
     print(f" YOLO Model          : {args.model}")
+    print(f" ANPR Enabled        : {not args.disable_anpr}")
+    if not args.disable_anpr:
+        print(f" OCR Engine          : {args.ocr_engine}")
     print(f" Recognition Model   : {model_display_name}")
     print(f" Embedding Dim       : 512-D L2-Normalized")
     print(f" Alignment           : 5-Point Landmark Similarity Transform")
@@ -421,24 +513,55 @@ def main():
 
     # 6. FaceGallery & FaceMatcher Initialization
     try:
+        print(f"[INFO] Connecting to database: {args.db_uri}", file=sys.stderr)
         gallery = load_gallery_from_dir(
-            args.gallery_dir, face_detector, face_embedder
+            args.gallery_dir, face_detector, face_embedder, db_uri=args.db_uri
         )
         face_matcher = FaceMatcher(
             gallery, threshold=args.face_threshold, margin=args.face_margin
         )
     except Exception as e:
-        print(f"[ERROR] Face Gallery/Matcher initialization failed: {e}", file=sys.stderr)
-        source.release()
-        sys.exit(1)
+        print(f"[WARNING] PostgreSQL database initialization failed ({e}). Falling back to in-memory mode.", file=sys.stderr)
+        try:
+            gallery = load_gallery_from_dir(args.gallery_dir, face_detector, face_embedder, db_uri=None)
+            face_matcher = FaceMatcher(gallery, threshold=args.face_threshold, margin=args.face_margin)
+        except Exception as fallback_err:
+            print(f"[ERROR] Face Gallery/Matcher fallback initialization failed: {fallback_err}", file=sys.stderr)
+            source.release()
+            sys.exit(1)
 
-    window_name = "VISION - Vertical Slice 5.6 (Face Recognition)"
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    # 7. ANPR Engine Initialization
+    enable_anpr = not args.disable_anpr
+    if enable_anpr:
+        plate_detector = LicensePlateDetector(model_path=args.plate_model)
+        plate_enhancer = PlateEnhancer(target_height=70)
+        plate_ocr = get_plate_ocr_engine(args.ocr_engine)
+        plate_track_cache = PlateTrackCache()
+    else:
+        plate_detector = None
+        plate_enhancer = None
+        plate_ocr = None
+        plate_track_cache = None
+
+    window_name = "VISION - Vertical Slice 6.0 (Face + ANPR)"
+    has_gui = True
+    try:
+        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    except cv2.error:
+        print(
+            "[WARNING] OpenCV GUI windowing is unavailable (opencv-python-headless detected). "
+            "Running in headless console mode. (To enable GUI playback, activate .venv with: .\\.venv\\Scripts\\Activate.ps1)",
+            file=sys.stderr,
+        )
+        has_gui = False
 
     latest_detections: List[Detection] = []
     latest_tracks: List[Track] = []
     latest_faces: List[FaceDetection] = []
     latest_associations: List[FaceTrackAssociation] = []
+    latest_plates: List[PlateRecognitionResult] = []
+    track_plate_map: Dict[int, PlateRecognitionResult] = {}
+    total_plates_detected = 0
 
     # Track-level identity cache: track_id -> IdentityMatch
     track_identity_cache: Dict[int, IdentityMatch] = {}
@@ -586,6 +709,22 @@ def main():
                                 print(f"  Second-Best: {match_result.second_similarity:.4f}")
                                 print(f"  Margin     : {match_result.margin:.4f} (Required: >= {args.face_margin:.2f})")
                                 print(f"  Match Result: {'MATCH' if match_result.is_match else 'UNKNOWN'}")
+
+                            # Flag unrecognized/unknown users immediately
+                            if not match_result.is_match:
+                                print(f"[ALERT] Track #{track_id} is UNKNOWN and has been FLAGGED!", file=sys.stderr)
+                                if getattr(gallery, "db", None) is not None:
+                                    try:
+                                        vec = embedding.vector if isinstance(embedding, FaceEmbedding) else embedding
+                                        gallery.db.flag_unauthorized_user(
+                                            embedding=vec,
+                                            frame=face_crop,
+                                            track_id=track_id,
+                                            video_source=args.video
+                                        )
+                                        print(f"[INFO] Logged flagged event for track #{track_id} in PostgreSQL.", file=sys.stderr)
+                                    except Exception as db_err:
+                                        print(f"[WARNING] Failed to store flagged event in database: {db_err}", file=sys.stderr)
                         else:
                             match_result = IdentityMatch(identity=None, similarity=0.0, is_match=False)
 
@@ -596,6 +735,86 @@ def main():
 
                 total_recognized_faces += frame_recognized_count
                 total_unknown_faces += frame_unknown_count
+
+                # F. Vehicle License Plate Recognition (ANPR)
+                current_frame_plates: List[PlateRecognitionResult] = []
+
+                if enable_anpr and plate_detector is not None:
+                    vehicle_tracks = [t for t in latest_tracks if t.class_name in TARGET_VEHICLE_CLASSES]
+                    for veh in vehicle_tracks:
+                        tid = veh.track_id
+                        cached_p = plate_track_cache.get(tid)
+
+                        # If already cached with high confidence, reuse to save compute
+                        if cached_p is not None and cached_p.confidence >= 0.85:
+                            current_frame_plates.append(cached_p)
+                            track_plate_map[tid] = cached_p
+                            continue
+
+                        vb = veh.bbox
+                        vx1 = max(0, min(vb.x1, frame_w))
+                        vy1 = max(0, min(vb.y1, frame_h))
+                        vx2 = max(0, min(vb.x2, frame_w))
+                        vy2 = max(0, min(vb.y2, frame_h))
+
+                        if (vx2 - vx1) < 30 or (vy2 - vy1) < 30:
+                            if cached_p is not None:
+                                current_frame_plates.append(cached_p)
+                                track_plate_map[tid] = cached_p
+                            continue
+
+                        veh_crop = frame[vy1:vy2, vx1:vx2]
+                        vh, vw = veh_crop.shape[:2]
+                        plate_dets = plate_detector.detect(veh_crop)
+
+                        best_candidate_res = None
+                        for pdet in plate_dets[:3]:
+                            pb = pdet.bbox
+                            # Add 4px vertical and 6px horizontal margin around detected plate box
+                            py1 = max(0, pb.y1 - 4)
+                            py2 = min(vh, pb.y2 + 4)
+                            px1 = max(0, pb.x1 - 6)
+                            px2 = min(vw, pb.x2 + 6)
+                            p_crop = veh_crop[py1:py2, px1:px2]
+                            if p_crop.size == 0 or (px2 - px1) < 40 or (py2 - py1) < 12:
+                                continue
+
+                            enh_crop = plate_enhancer.enhance(p_crop)
+                            target_crop = enh_crop if enh_crop is not None else p_crop
+                            raw_txt, ocr_conf = plate_ocr.recognize(target_crop)
+                            cln_txt, is_valid, mult = clean_plate_text(raw_txt)
+
+                            if cln_txt and (is_valid or len(cln_txt) >= 7):
+                                g_bbox = map_crop_to_global_bbox(
+                                    BoundingBox(x1=px1, y1=py1, x2=px2, y2=py2),
+                                    BoundingBox(x1=vx1, y1=vy1, x2=vx2, y2=vy2),
+                                    frame_w,
+                                    frame_h,
+                                )
+                                cand_res = PlateRecognitionResult(
+                                    raw_text=raw_txt,
+                                    cleaned_text=cln_txt,
+                                    confidence=ocr_conf * mult,
+                                    is_valid=is_valid,
+                                    bbox=g_bbox,
+                                )
+                                # If full valid Indian plate, take it immediately
+                                if is_valid and len(cln_txt) in {9, 10}:
+                                    best_candidate_res = cand_res
+                                    break
+                                elif best_candidate_res is None or len(cln_txt) > len(best_candidate_res.cleaned_text):
+                                    best_candidate_res = cand_res
+
+                        if best_candidate_res is not None:
+                            updated_res = plate_track_cache.update(tid, best_candidate_res, frame_index)
+                            current_frame_plates.append(updated_res)
+                            track_plate_map[tid] = updated_res
+                            total_plates_detected += 1
+                        elif cached_p is not None:
+                            current_frame_plates.append(cached_p)
+                            track_plate_map[tid] = cached_p
+
+                    latest_plates = current_frame_plates
 
                 t1 = time.time()
 
@@ -628,7 +847,13 @@ def main():
                 latest_faces,
                 latest_associations,
                 track_identity_cache,
+                latest_plates,
+                track_plate_map,
             )
+
+            # Calculate unique flagged tracks
+            unique_flagged = sum(1 for m in track_identity_cache.values() if not m.is_match)
+            active_vehicles_count = len([t for t in latest_tracks if t.class_name in TARGET_VEHICLE_CLASSES])
 
             # Draw HUD
             final_frame = draw_hud(
@@ -643,27 +868,39 @@ def main():
                 faces_associated_count=len(latest_associations),
                 embeddings_generated_count=total_embeddings_generated,
                 recognized_faces_count=total_recognized_faces,
-                unknown_faces_count=total_unknown_faces,
+                flagged_tracks_count=unique_flagged,
                 recog_threshold=args.face_threshold,
                 recog_margin=args.face_margin,
                 face_model_name=model_display_name,
+                vehicles_tracked_count=active_vehicles_count,
+                plates_read_count=len(track_plate_map),
             )
 
-            # Display frame
-            cv2.imshow(window_name, final_frame)
+            # Display frame if GUI available
+            if has_gui:
+                cv2.imshow(window_name, final_frame)
 
-            target_delay_ms = max(1, int(1000 / source.fps)) if source.fps > 0 else 30
-            processing_time_ms = int((time.time() - frame_start) * 1000)
-            wait_delay = max(1, target_delay_ms - processing_time_ms)
+                target_delay_ms = max(1, int(1000 / source.fps)) if source.fps > 0 else 30
+                processing_time_ms = int((time.time() - frame_start) * 1000)
+                wait_delay = max(1, target_delay_ms - processing_time_ms)
 
-            key = cv2.waitKey(wait_delay) & 0xFF
-            if key == ord("q"):
-                print("[INFO] Exit key 'q' pressed by user. Shutting down...")
-                break
+                key = cv2.waitKey(wait_delay) & 0xFF
+                if key == ord("q"):
+                    print("[INFO] Exit key 'q' pressed by user. Shutting down...")
+                    break
+            else:
+                if frame_index % 25 == 0 or frame_index == source.frame_count:
+                    total_str = f"/{source.frame_count}" if source.frame_count > 0 else ""
+                    print(
+                        f"[PROGRESS] Frame {frame_index}{total_str} | Tracks: {len(latest_tracks)} | "
+                        f"Faces: {total_recognized_faces} | Plates: {len(track_plate_map)} | Inf FPS: {recent_inference_fps:.1f}",
+                        file=sys.stderr,
+                    )
 
     finally:
         source.release()
-        cv2.destroyAllWindows()
+        if has_gui:
+            cv2.destroyAllWindows()
 
     avg_inf_fps = (
         (inference_count / total_inference_time)
@@ -671,7 +908,7 @@ def main():
         else 0.0
     )
     print("==================================================")
-    print("VISION — Slice 5.6 Summary")
+    print("VISION — Slice 6.0 Summary (Face + ANPR)")
     print("==================================================")
     print(f"Frames Processed       : {frame_index}")
     print(f"YOLO Inferences        : {inference_count}")
@@ -683,6 +920,12 @@ def main():
     print(f"Embeddings Generated   : {total_embeddings_generated}")
     print(f"Recognized Faces       : {total_recognized_faces}")
     print(f"Unknown Faces          : {total_unknown_faces}")
+    if enable_anpr:
+        print(f"ANPR Engine            : Enabled ({args.ocr_engine})")
+        print(f"Plates Detected        : {total_plates_detected}")
+        print(f"Unique Plates Read     : {len(track_plate_map)}")
+        for tid, prec in track_plate_map.items():
+            print(f"  • Vehicle Track #{tid}: {format_indian_plate(prec.cleaned_text)} (conf: {prec.confidence:.2f}, valid: {prec.is_valid})")
     print(f"Recognition Model      : {model_display_name}")
     print(f"Alignment              : 5-Point Landmark Similarity Transform")
     print(f"Recognition Threshold  : {args.face_threshold:.2f}")
@@ -693,3 +936,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

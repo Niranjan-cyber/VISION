@@ -1,6 +1,6 @@
 import os
 import sys
-from typing import Dict, List, Set, Union
+from typing import Dict, List, Set, Union, Optional
 import cv2
 import numpy as np
 
@@ -23,10 +23,15 @@ class FaceGallery:
 
     TARGET_DIMENSION = 512
 
-    def __init__(self):
+    def __init__(self, db_uri: Optional[str] = None):
         self._gallery: Dict[str, List[np.ndarray]] = {}
+        self._frames: Dict[str, List[np.ndarray]] = {}  # Store frame crops
+        self.db = None
+        if db_uri:
+            from src.face.vector_db import PostgresVectorDatabase
+            self.db = PostgresVectorDatabase(db_uri)
 
-    def add(self, identity: str, embedding: Union[FaceEmbedding, np.ndarray]) -> None:
+    def add(self, identity: str, embedding: Union[FaceEmbedding, np.ndarray], frame: Optional[np.ndarray] = None) -> None:
         """
         Enrolls a 512-dimensional face embedding for the given identity name.
         Ensures strict L2-normalization without mutating the input vector.
@@ -55,12 +60,18 @@ class FaceGallery:
 
         if identity not in self._gallery:
             self._gallery[identity] = []
+            self._frames[identity] = []
 
         self._gallery[identity].append(clean_copy)
+        self._frames[identity].append(frame)
 
     def get(self, identity: str) -> List[np.ndarray]:
         """Returns all reference embeddings for the specified identity."""
         return self._gallery.get(identity, [])
+
+    def get_frames(self, identity: str) -> List[np.ndarray]:
+        """Returns all reference frames (face crops) for the specified identity."""
+        return self._frames.get(identity, [])
 
     def identities(self) -> List[str]:
         """Returns a sorted list of all enrolled identity names."""
@@ -79,23 +90,37 @@ def load_gallery_from_dir(
     gallery_dir: str,
     face_detector,
     face_embedder,
+    db_uri: Optional[str] = None,
 ) -> FaceGallery:
     """
     Populates a FaceGallery by scanning subdirectories in gallery_dir (e.g. data/face_gallery/<identity>/*),
     detecting faces, generating 512-d ArcFace embeddings, and enrolling valid embeddings.
+    Also synchronizes with a persistent vector database if db_uri is provided.
     """
-    gallery = FaceGallery()
+    from typing import Optional
+    gallery = FaceGallery(db_uri=db_uri)
+
+    # 1. Pre-load all existing enrolled users from the database if available
+    if gallery.db is not None:
+        try:
+            print("[INFO] Pre-loading user embeddings and frames from PostgreSQL database...", file=sys.stderr)
+            db_users = gallery.db.fetch_all_users()
+            for identity, embedding, frame, source_name in db_users:
+                gallery.add(identity, embedding, frame)
+            print(f"[INFO] Loaded {len(db_users)} reference embeddings from database.", file=sys.stderr)
+        except Exception as e:
+            print(f"[WARNING] Could not pre-load users from database: {e}", file=sys.stderr)
 
     if not os.path.exists(gallery_dir):
         print(
-            f"[INFO] Face gallery directory '{gallery_dir}' does not exist. Initializing empty gallery.",
+            f"[INFO] Face gallery directory '{gallery_dir}' does not exist. Using database/empty gallery.",
             file=sys.stderr,
         )
         return gallery
 
     if not os.path.isdir(gallery_dir):
         print(
-            f"[INFO] Face gallery path '{gallery_dir}' is not a directory. Initializing empty gallery.",
+            f"[INFO] Face gallery path '{gallery_dir}' is not a directory. Using database/empty gallery.",
             file=sys.stderr,
         )
         return gallery
@@ -110,17 +135,13 @@ def load_gallery_from_dir(
 
     if not subdirs:
         print(
-            f"[INFO] No identity subdirectories found in '{gallery_dir}'. Initializing empty gallery.",
+            f"[INFO] No identity subdirectories found in '{gallery_dir}'. Returning gallery (size: {len(gallery)}).",
             file=sys.stderr,
         )
         return gallery
 
     for identity in subdirs:
         identity_path = os.path.join(gallery_dir, identity)
-        print(
-            f"[INFO] Loading gallery identity '{identity}' from '{identity_path}'",
-            file=sys.stderr,
-        )
 
         all_entries = sorted(os.listdir(identity_path))
         image_files = []
@@ -133,19 +154,25 @@ def load_gallery_from_dir(
                 image_files.append(entry_path)
 
         if not image_files:
-            print(
-                f"[WARNING] No image files found for identity '{identity}' in '{identity_path}'.",
-                file=sys.stderr,
-            )
             continue
-
-        print(
-            f"[INFO] Found {len(image_files)} image file(s) for identity '{identity}'.",
-            file=sys.stderr,
-        )
 
         for img_path in image_files:
             filename = os.path.basename(img_path)
+            # Use relative path as the unique source name key in database
+            rel_path = os.path.relpath(img_path, gallery_dir)
+
+            # Skip processing if already synced in database
+            if gallery.db is not None:
+                try:
+                    if gallery.db.has_user_file(rel_path):
+                        continue
+                except Exception:
+                    pass
+
+            print(
+                f"[INFO] Processing image '{filename}' for identity '{identity}'...",
+                file=sys.stderr,
+            )
             img = cv2.imread(img_path)
             if img is None:
                 print(
@@ -192,11 +219,16 @@ def load_gallery_from_dir(
             embedding = face_embedder.embed(face_crop)
 
             if embedding is not None:
-                gallery.add(identity, embedding)
+                # Add in-memory
+                gallery.add(identity, embedding, face_crop)
                 print(
                     f"[INFO] Enrolled reference embedding for '{identity}' from '{filename}'.",
                     file=sys.stderr,
                 )
+                # Enroll in database
+                if gallery.db is not None:
+                    vec = embedding.vector if isinstance(embedding, FaceEmbedding) else embedding
+                    gallery.db.add_user(identity, vec, face_crop, rel_path)
             else:
                 print(
                     f"[WARNING] Failed to generate embedding for gallery image '{filename}'. Skipping.",

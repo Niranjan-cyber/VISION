@@ -84,3 +84,32 @@ class IdentityMatch:
     is_match: bool
     second_similarity: float = 0.0
     margin: float = 0.0
+
+
+@dataclass
+class PlateDetection:
+    """Represents a detected license plate location and confidence."""
+
+    bbox: BoundingBox
+    confidence: float
+
+
+@dataclass
+class PlateRecognitionResult:
+    """Represents recognized text, confidence, and validation status of a license plate."""
+
+    raw_text: str
+    cleaned_text: str
+    confidence: float
+    is_valid: bool
+    bbox: BoundingBox
+
+
+@dataclass
+class VehiclePlateAssociation:
+    """Links a vehicle track ID to its recognized license plate."""
+
+    track_id: int
+    vehicle_class: str
+    plate: PlateRecognitionResult
+
