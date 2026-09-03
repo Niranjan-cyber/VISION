@@ -17,7 +17,7 @@ In Vertical Slice 7.0, an Event Intelligence & Alert Engine was added on top of 
 
 ---
 
-## 🚀 Full Pipeline Architecture (Vertical Slice 5.7)
+## 🚀 Full Pipeline Architecture (Vertical Slice 7.0)
 
 ```text
 VIDEO STREAM (MP4 / RTSP / Webcam)
@@ -31,45 +31,44 @@ VIDEO STREAM (MP4 / RTSP / Webcam)
      ▼
 [ByteTrackTracker] (Kalman Filter + 2-Stage Hungarian Matching) ──► Track[]
      │
-     ├───────────────────────────────────┐
-     ▼                                   ▼
-Vehicle Tracks                    Person Tracks (class_name == "person")
-(car, truck, bus, etc.)                  │
-                                         ▼
-                                  Person Crop [py1:py2, px1:px2]
+     ├───────────────────────────────────┬───────────────────────────────────┐
+     ▼                                   ▼                                   ▼
+Person Tracks                       Vehicle Tracks                      Spatial Geometry
+(class_name == "person")            (car, truck, bus, etc.)             (BoundingBox.bottom_center)
+     │                                   │                                   │
+     ▼                                   ▼                                   │
+[FaceDetector] (YuNet ONNX)         [LicensePlateDetector]                   │
+     │                                   │                                   │
+     ▼                                   ▼                                   │
+[align_face] (5-Pt Similarity)      [PlateEnhancer] + [PlateOCR]             │
+     │                                   │                                   │
+     ▼                                   ▼                                   │
+[W600KR50Embedder] (512-D L2 Norm)  [clean_plate_text]                       │
+     │                                   │                                   │
+     ▼                                   ▼                                   │
+[FaceMatcher] / [VectorDB]          [PlateTrackCache]                        │
+     │                                   │                                   │
+     └───────────────────────────────────┴───────────────────────────────────┘
                                          │
                                          ▼
-                                  [FaceDetector] (YuNet ONNX) ──► 5 Facial Landmarks
+                            [Unified ObjectState]
                                          │
                                          ▼
-                                  Crop-to-Global Coordinate Mapping
+                               [Zone / Geometry Engine]
+                                (configs/zones.yaml)
                                          │
                                          ▼
-                                  [align_face] (5-Point Affine Similarity Transform)
+                              [EventEngine Rule Evaluation]
+                                 ├── INTRUSION (HIGH)
+                                 ├── UNKNOWN_PERSON_INTRUSION (HIGH)
+                                 ├── LOITERING (MEDIUM)
+                                 └── SUSPICIOUS_VEHICLE (MEDIUM)
                                          │
                                          ▼
-                                  Canonical 112×112 Aligned BGR Crop
+                         [SecurityEvent] & [Operational Alert]
                                          │
                                          ▼
-                                  [W600KR50Embedder] (InsightFace ResNet-50 ONNX)
-                                         │
-                                         ▼
-                                  [l2_normalize] ──► 512-D L2-Normalized Embedding
-                                         │
-                                         ▼
-                                  [FaceGallery] (Aligned Multi-Image Reference Vectors)
-                                         │
-                                         ▼
-                                  [FaceMatcher] (Cosine Similarity + Margin Check)
-                                         │
-                                         ▼
-                                  Track-Level Identity Cache (Instant O(1) Lookups)
-                                     ↙       ↘
-                                Known          Unknown
-                                 │               │
-     ┌───────────────────────────┴───────────────┘
-     ▼
-[Visualization & HUD Annotations]
+                         [Visualization & HUD Annotations]
 ```
 
 ---
