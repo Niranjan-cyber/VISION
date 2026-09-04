@@ -1,3 +1,4 @@
+import { AlertOctagon, ArrowLeft } from "lucide-react";
 import VideoFeed from "./VideoFeed";
 import PersonsTable from "./PersonsTable";
 import VehiclesTable from "./VehiclesTable";
@@ -15,7 +16,8 @@ export default function CameraDetail({ camera, alerts, onBack }: Props) {
     <div className="camera-detail">
       <div className="camera-detail-head">
         <button className="back-btn" onClick={onBack}>
-          ← All Cameras
+          <ArrowLeft size={14} strokeWidth={2.25} />
+          All Cameras
         </button>
         <div className="camera-detail-title">
           <span className="mono">{camera.camera_id}</span> — {camera.camera_name.toUpperCase()}
@@ -33,7 +35,7 @@ export default function CameraDetail({ camera, alerts, onBack }: Props) {
       <div className="main-grid">
         <div className="panel video-panel">
           <div className="panel-header">
-            <span>SURVEILLANCE FEED</span>
+            <span>Surveillance Feed</span>
           </div>
           {camera.camera_status === "online" ? (
             <VideoFeed streamUrl={cameraStreamUrl(camera.camera_id)} alt={`Live feed — ${camera.camera_name}`} />
@@ -48,14 +50,17 @@ export default function CameraDetail({ camera, alerts, onBack }: Props) {
 
         <div className="panel alerts-panel">
           <div className="panel-header">
-            <span>ALERTS — {camera.camera_name.toUpperCase()}</span>
+            <span>Alerts — {camera.camera_name}</span>
           </div>
           <div className="alerts-list">
             {alerts.length === 0 && <div className="empty-state">No active alerts for this camera.</div>}
             {alerts.map((a) => (
               <div className={`alert-card sev-${a.severity.toLowerCase()}`} key={a.alert_id}>
                 <div className="alert-top">
-                  <span className="alert-severity">{a.severity} PRIORITY</span>
+                  <span className="alert-severity">
+                    <AlertOctagon size={13} strokeWidth={2.25} />
+                    {a.severity} PRIORITY
+                  </span>
                 </div>
                 <div className="alert-title">{a.title.replace(/[^\x00-\x7F]/g, "").trim()}</div>
                 {a.zone_name && <div className="alert-zone">{a.zone_name}</div>}

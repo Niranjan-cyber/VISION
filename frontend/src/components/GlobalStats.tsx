@@ -1,3 +1,4 @@
+import { AlertTriangle, ScanFace, ShieldCheck, Users, Car } from "lucide-react";
 import type { CameraDetectionState, GlobalDetections } from "../types";
 
 interface Props {
@@ -10,23 +11,24 @@ function alertCountFor(cam: CameraDetectionState): number {
 
 export default function GlobalStats({ detections }: Props) {
   const stats = detections?.statistics ?? null;
-  const items: { label: string; value: number | string }[] = [
-    { label: "TOTAL PERSONS", value: stats?.persons ?? "—" },
-    { label: "TOTAL VEHICLES", value: stats?.vehicles ?? "—" },
-    { label: "FACES DETECTED", value: stats?.faces_detected ?? "—" },
-    { label: "IDENTIFIED", value: stats?.recognized_faces ?? "—" },
-    { label: "ACTIVE ALERTS", value: stats?.active_events ?? "—" },
+  const items: { label: string; value: number | string; icon: typeof Users }[] = [
+    { label: "PERSONS DETECTED", value: stats?.persons ?? "—", icon: Users },
+    { label: "VEHICLES DETECTED", value: stats?.vehicles ?? "—", icon: Car },
+    { label: "FACES DETECTED", value: stats?.faces_detected ?? "—", icon: ScanFace },
+    { label: "IDENTIFIED", value: stats?.recognized_faces ?? "—", icon: ShieldCheck },
+    { label: "ACTIVE ALERTS", value: stats?.active_events ?? "—", icon: AlertTriangle },
   ];
 
   return (
     <div className="panel stats-panel">
       <div className="panel-header">
-        <span>GLOBAL STATISTICS</span>
+        <span>Global Statistics</span>
         {stats && <span className="tag">{stats.cameras_active} camera{stats.cameras_active === 1 ? "" : "s"} active</span>}
       </div>
       <div className="stats-bar">
         {items.map((it) => (
           <div className="stat-card" key={it.label}>
+            <it.icon className="stat-icon" size={16} strokeWidth={2} />
             <div className="stat-value">{it.value}</div>
             <div className="stat-label">{it.label}</div>
           </div>

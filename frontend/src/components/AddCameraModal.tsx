@@ -74,6 +74,7 @@ export default function AddCameraModal({ onClose, onAdded, atLimit }: Props) {
           </div>
         ) : (
           <form className="modal-body" onSubmit={handleSubmit}>
+            <div className="modal-label">Choose source type</div>
             <div className="source-type-toggle" role="radiogroup" aria-label="Camera source">
               <label className={`source-type-option ${sourceType === "video" ? "active" : ""}`}>
                 <input
@@ -83,7 +84,8 @@ export default function AddCameraModal({ onClose, onAdded, atLimit }: Props) {
                   checked={sourceType === "video"}
                   onChange={() => setSourceType("video")}
                 />
-                Upload Video
+                <span className="source-type-option-title">Recorded Video</span>
+                <span className="source-type-option-sub">Upload surveillance footage</span>
               </label>
               <label className={`source-type-option ${sourceType === "live" ? "active" : ""}`}>
                 <input
@@ -93,7 +95,8 @@ export default function AddCameraModal({ onClose, onAdded, atLimit }: Props) {
                   checked={sourceType === "live"}
                   onChange={() => setSourceType("live")}
                 />
-                Live Camera
+                <span className="source-type-option-title">Live Camera</span>
+                <span className="source-type-option-sub">USB / Webcam device</span>
               </label>
             </div>
 

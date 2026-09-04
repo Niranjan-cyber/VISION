@@ -28,6 +28,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from src.core.device import resolve_yolo_device
 from src.ingestion.video import discover_camera_devices
 from src.pipeline.camera_manager import AI_FPS_DEFAULT, CameraLimitReached, CameraManager, MAX_ACTIVE_CAMERAS
 from src.pipeline.serialize import (
@@ -123,6 +124,36 @@ def _camera_or_404(camera_id: str):
     return cam
 
 
+def _ai_engine_status() -> dict:
+    """Reports which device each pipeline stage is actually running on.
+    Prefers the *actually-granted* provider read off a live camera's session
+    (never just what was requested — see src/core/device.py's discipline of
+    checking session.get_providers() after the fact) and only falls back to
+    the resolved-but-unconfirmed device before any camera has come online."""
+    yolo_device = "CUDA" if resolve_yolo_device(DEVICE).startswith("cuda") else "CPU"
+    face_device = None
+    for cam in camera_manager.list_cameras():
+        session, _ = cam.snapshot()
+        if session is None:
+            continue
+        yolo_device = "CUDA" if session.detector.device.startswith("cuda") else "CPU"
+        provider = getattr(session.face_embedder, "active_provider", "CPUExecutionProvider")
+        face_device = "CUDA" if provider == "CUDAExecutionProvider" else "CPU"
+        break
+    if face_device is None:
+        # No camera online yet — report the resolved device without
+        # claiming a specific onnxruntime provider was actually granted.
+        face_device = yolo_device
+    return {
+        "yolo_device": yolo_device,
+        "face_recognition_device": face_device,
+        "yunet_device": "CPU",
+        "tracking_device": "CPU",
+        "event_engine_device": "CPU",
+        "ai_fps": AI_FPS,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Global (aggregate) endpoints
 # ---------------------------------------------------------------------------
@@ -133,7 +164,9 @@ def health():
 
 @app.get("/status")
 def global_status():
-    return serialize_global_status(camera_manager)
+    payload = serialize_global_status(camera_manager)
+    payload["ai_engine"] = _ai_engine_status()
+    return payload
 
 
 @app.get("/detections")

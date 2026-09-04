@@ -87,11 +87,23 @@ export interface AlertItem {
   track_id: number | null;
 }
 
+/** Which device each pipeline stage is actually running on, and the
+ * configured AI-worker sampling rate — part of GET /status. */
+export interface AIEngineStatus {
+  yolo_device: "CUDA" | "CPU";
+  face_recognition_device: "CUDA" | "CPU";
+  yunet_device: "CPU";
+  tracking_device: "CPU";
+  event_engine_device: "CPU";
+  ai_fps: number;
+}
+
 /** GET /status (global aggregate). */
 export interface GlobalStatus {
   cameras_active: number;
   cameras_max: number;
-  cameras: Record<string, { camera_name: string; status: CameraStatus; error: string | null }>;
+  cameras: Record<string, { camera_name: string; status: CameraStatus; error: string | null; source_type: SourceType }>;
+  ai_engine: AIEngineStatus;
 }
 
 /** One entry of GET /cameras. */

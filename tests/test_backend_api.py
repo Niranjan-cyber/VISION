@@ -71,6 +71,21 @@ class TestBackendAPI(unittest.TestCase):
         self.assertIn("CAM-01", body["cameras"])
         self.assertEqual(body["cameras"]["CAM-01"]["status"], "online")
 
+    def test_global_status_reports_real_ai_engine_devices(self):
+        resp = self.client.get("/status")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertIn("ai_engine", body)
+        engine = body["ai_engine"]
+        for key in ("yolo_device", "face_recognition_device", "yunet_device", "tracking_device", "event_engine_device", "ai_fps"):
+            self.assertIn(key, engine)
+        self.assertIn(engine["yolo_device"], ("CUDA", "CPU"))
+        self.assertIn(engine["face_recognition_device"], ("CUDA", "CPU"))
+        self.assertEqual(engine["yunet_device"], "CPU")  # never claims GPU YuNet doesn't have
+        self.assertEqual(engine["tracking_device"], "CPU")
+        self.assertEqual(engine["event_engine_device"], "CPU")
+        self.assertGreater(engine["ai_fps"], 0)
+
     def test_global_detections_contract_and_nonempty_output(self):
         resp = self.client.get("/detections")
         self.assertEqual(resp.status_code, 200)

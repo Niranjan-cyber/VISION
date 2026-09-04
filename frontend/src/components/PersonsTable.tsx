@@ -24,7 +24,7 @@ export default function PersonsTable({ persons }: Props) {
   return (
     <div className="panel table-panel">
       <div className="panel-header">
-        <span>TRACKED PERSONS</span>
+        <span>Tracked Persons</span>
       </div>
       {persons.length === 0 ? (
         <div className="empty-state">No persons currently tracked.</div>

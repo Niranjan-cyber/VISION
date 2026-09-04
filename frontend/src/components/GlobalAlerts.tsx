@@ -1,3 +1,4 @@
+import { AlertOctagon } from "lucide-react";
 import type { AlertItem, Severity } from "../types";
 
 interface Props {
@@ -5,11 +6,11 @@ interface Props {
   onFocusCamera: (cameraId: string) => void;
 }
 
-const SEVERITY_META: Record<Severity, { icon: string; className: string }> = {
-  CRITICAL: { icon: "🔴", className: "sev-critical" },
-  HIGH: { icon: "🔴", className: "sev-high" },
-  MEDIUM: { icon: "🟠", className: "sev-medium" },
-  LOW: { icon: "🟡", className: "sev-low" },
+const SEVERITY_META: Record<Severity, { className: string }> = {
+  CRITICAL: { className: "sev-critical" },
+  HIGH: { className: "sev-high" },
+  MEDIUM: { className: "sev-medium" },
+  LOW: { className: "sev-low" },
 };
 
 function formatTime(ts: number): string {
@@ -33,7 +34,7 @@ export default function GlobalAlerts({ alerts, onFocusCamera }: Props) {
   return (
     <div className="panel alerts-panel">
       <div className="panel-header">
-        <span>SECURITY ALERTS</span>
+        <span>Security Alerts</span>
         <span className="tag">{alerts.length} active</span>
       </div>
       <div className="alerts-list">
@@ -48,7 +49,8 @@ export default function GlobalAlerts({ alerts, onFocusCamera }: Props) {
             >
               <div className="alert-top">
                 <span className="alert-severity">
-                  {meta.icon} {a.severity}
+                  <AlertOctagon size={13} strokeWidth={2.25} />
+                  {a.severity}
                 </span>
                 <span className="alert-camera-tag mono">{a.camera_id}</span>
                 <span className="alert-time mono">{formatTime(a.timestamp)}</span>

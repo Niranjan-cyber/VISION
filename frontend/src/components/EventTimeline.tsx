@@ -22,7 +22,7 @@ export default function EventTimeline({ alerts }: Props) {
   return (
     <div className="panel timeline-panel">
       <div className="panel-header">
-        <span>EVENT TIMELINE</span>
+        <span>Event Timeline</span>
       </div>
       {alerts.length === 0 ? (
         <div className="empty-state">No events recorded yet.</div>

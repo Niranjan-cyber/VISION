@@ -9,7 +9,7 @@ export default function VehiclesTable({ vehicles, anprEnabled }: Props) {
   return (
     <div className="panel table-panel">
       <div className="panel-header">
-        <span>VEHICLES {anprEnabled ? "/ ANPR" : ""}</span>
+        <span>Vehicles {anprEnabled ? "/ ANPR" : ""}</span>
         {!anprEnabled && <span className="badge-muted">ANPR OFFLINE</span>}
       </div>
       {!anprEnabled ? (

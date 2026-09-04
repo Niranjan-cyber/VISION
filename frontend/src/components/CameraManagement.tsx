@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Plus, RotateCw, Trash2 } from "lucide-react";
 import type { CameraSummary } from "../types";
 import { removeCamera, restartCamera } from "../api";
 
@@ -35,9 +36,10 @@ export default function CameraManagement({ cameras, maxSlots, onFocusCamera, onA
   return (
     <div className="panel management-panel">
       <div className="panel-header">
-        <span>CAMERA MANAGEMENT</span>
+        <span>Camera Management</span>
         <button className="add-camera-btn" onClick={onAddClick} disabled={atLimit} title={atLimit ? `Maximum ${maxSlots} active camera streams reached.` : undefined}>
-          + Add Camera
+          <Plus size={14} strokeWidth={2.5} />
+          Add Camera
         </button>
       </div>
       {atLimit && (
@@ -58,9 +60,11 @@ export default function CameraManagement({ cameras, maxSlots, onFocusCamera, onA
             <span className="mgmt-status">{cam.status.toUpperCase()}</span>
             <span className="mgmt-actions">
               <button disabled={busy === cam.camera_id} onClick={() => handleRestart(cam.camera_id)}>
+                <RotateCw size={12} strokeWidth={2.25} />
                 Restart
               </button>
               <button disabled={busy === cam.camera_id} className="mgmt-remove" onClick={() => handleRemove(cam.camera_id)}>
+                <Trash2 size={12} strokeWidth={2.25} />
                 Remove
               </button>
             </span>
