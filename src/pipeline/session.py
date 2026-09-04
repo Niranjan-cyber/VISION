@@ -56,6 +56,7 @@ from src.face.gallery import load_gallery_from_dir
 from src.face.matcher import FaceMatcher
 from src.face.modern_embedder import W600KR50Embedder
 from src.ingestion.video import VideoSource
+from src.storage.zone_repository import ZoneRepository
 from src.tracking.tracker import ByteTrackTracker
 
 TARGET_VEHICLE_CLASSES: Set[str] = {"car", "truck", "bus", "motorcycle"}
@@ -123,6 +124,7 @@ class PipelineSession:
         debug_face_crops: bool = False,
         device: str = "auto",
         verbose: bool = True,
+        zone_repo: Optional[ZoneRepository] = None,
     ):
         if (video_path is None) == (device_index is None):
             raise PipelineSubsystemError(
@@ -249,21 +251,25 @@ class PipelineSession:
             self.plate_ocr = None
             self.plate_track_cache = None
 
-        # 8. Zones + EventEngine (optional)
-        self.zones: List[Zone] = []
-        self.event_engine: Optional[EventEngine] = None
-        if zones_path:
-            try:
-                self.zones = load_zones_from_file(zones_path)
-                self._log(f"[INFO] Loaded {len(self.zones)} surveillance zone(s) from '{zones_path}'.")
-                self.event_engine = EventEngine(
-                    zones=self.zones,
-                    loitering_duration=loitering_duration,
-                    stationary_duration=stationary_duration,
-                    movement_threshold=movement_threshold,
-                )
-            except Exception as e:
-                self._log(f"[WARNING] Failed to load zones from '{zones_path}': {e}. Event engine disabled.")
+        # 8. Zones + EventEngine
+        # The event engine always runs, even with zero zones (an empty zone
+        # list simply never fires a zone-based event) — this is what lets an
+        # operator add a zone later, via the Phase 3 zone-management API, to
+        # a camera that started with none. zones_path (YAML) remains the
+        # golden-demo bootstrap; when a zone_repo is supplied (CameraManager
+        # always provides one), it seeds that camera's row once and becomes
+        # the live source of truth from then on — see _resolve_zones().
+        self.zones_path = zones_path
+        self.zone_repo = zone_repo
+        self.zones: List[Zone] = self._resolve_zones()
+        self.event_engine = EventEngine(
+            zones=self.zones,
+            loitering_duration=loitering_duration,
+            stationary_duration=stationary_duration,
+            movement_threshold=movement_threshold,
+        )
+        if self.zones:
+            self._log(f"[INFO] Loaded {len(self.zones)} surveillance zone(s) for camera '{camera_id}'.")
 
         # Cumulative per-track / per-session state
         self.track_identity_cache: Dict[int, IdentityMatch] = {}
@@ -292,6 +298,50 @@ class PipelineSession:
         self.observed_unique_track_ids: Set[int] = set()
         self.max_active_tracks = 0
         self.start_time = time.time()
+
+    def _resolve_zones(self) -> List[Zone]:
+        """Resolves this camera's active zones. With a zone_repo (the
+        CameraManager-driven path), the database is the live source of
+        truth — a YAML zones_path only ever seeds it once, the first time
+        this camera_id has no rows, so an operator's later edits are never
+        clobbered by a restart. Without a zone_repo (bare PipelineSession —
+        the CLI, or a test constructing one directly), behavior is
+        unchanged from before Phase 3: plain YAML, no persistence. Disabled
+        zones are filtered out here so the event engine never evaluates
+        them, while they remain visible/re-enable-able in the zone-
+        management UI."""
+        if self.zone_repo is not None:
+            stored = self.zone_repo.list_for_camera(self.camera_id)
+            if not stored and self.zones_path:
+                try:
+                    yaml_zones = load_zones_from_file(self.zones_path)
+                    self.zone_repo.seed_if_empty(self.camera_id, yaml_zones)
+                    stored = self.zone_repo.list_for_camera(self.camera_id)
+                except Exception as e:
+                    self._log(f"[WARNING] Failed to load zones from '{self.zones_path}': {e}")
+            return [
+                Zone(id=z.id, name=z.name, zone_type=z.type, polygon=z.polygon)
+                for z in stored
+                if z.enabled
+            ]
+
+        if self.zones_path:
+            try:
+                return load_zones_from_file(self.zones_path)
+            except Exception as e:
+                self._log(f"[WARNING] Failed to load zones from '{self.zones_path}': {e}. Event engine will have no zones.")
+        return []
+
+    def refresh_zones(self) -> None:
+        """Re-reads zones from the zone_repo and pushes them into the
+        running event engine — called after a zone is created/edited/
+        deleted/toggled via the API so a live camera picks up the change
+        without needing a restart. No-op (by design) for a bare
+        PipelineSession with no zone_repo."""
+        if self.zone_repo is None:
+            return
+        self.zones = self._resolve_zones()
+        self.event_engine.set_zones(self.zones)
 
     def _log(self, msg: str) -> None:
         if self.verbose:

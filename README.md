@@ -9,9 +9,11 @@ This is an SIH hackathon MVP, not a production system. See **IMPLEMENTED NOW vs.
 ## 📚 Project Documentation
 
 - 📄 [docs/PROJECT_SUMMARY.md](docs/PROJECT_SUMMARY.md) — slice-by-slice history and benchmark metrics.
+- 📄 [docs/PHASE3.md](docs/PHASE3.md) — Phase 3 (Operational Intelligence): event/alert persistence, alert lifecycle, zone management, investigation workflow, database schema, new API endpoints.
+- 📄 [docs/GPU_SETUP.md](docs/GPU_SETUP.md) — optional CUDA acceleration setup (YOLO + face recognition); the base install stays CPU-only/portable without it.
 - 📄 [docs/VISION_PRD.md](docs/VISION_PRD.md) — the original PRD. **Describes a target architecture (SCRFD, LPRNet, etc.) that differs from what is actually implemented** (YuNet, custom ANPR) — treat it as a roadmap, not as documentation of current behavior.
-- 📄 [docs/DASHBOARD_DESIGN_SPEC.md](docs/DASHBOARD_DESIGN_SPEC.md) — the dashboard/architecture/event-flow design specification for the next implementation pass (design-only, build target, not yet built).
-- 📄 [configs/zones_demo.yaml](configs/zones_demo.yaml) — the calibrated golden demo zone, with notes on how it was derived.
+- 📄 [docs/DASHBOARD_DESIGN_SPEC.md](docs/DASHBOARD_DESIGN_SPEC.md) — the original Phase 2 dashboard design spec (superseded in places by the white/navy redesign and Phase 3 — see docs/PHASE3.md for current UI structure).
+- 📄 [configs/zones_demo.yaml](configs/zones_demo.yaml) — the calibrated golden demo zone. As of Phase 3, YAML zone files only *seed* a camera's zones the first time (see docs/PHASE3.md) — the live source of truth is the SQLite zone store, editable from the dashboard's Zones page.
 
 ---
 
@@ -134,20 +136,27 @@ ANPR is **disabled by default** for the live demo (`VISION_ENABLE_ANPR=false`, `
 - Video ingestion, YOLO11n detection, ByteTrack tracking, YuNet face detection, InsightFace W600K-R50 recognition (Slices 1–5.7)
 - ANPR pipeline (detector/enhancer/OCR/consensus) — implemented but **off by default** for the demo (see above)
 - Event Intelligence & Alert Engine: `INTRUSION`, `UNKNOWN_PERSON_INTRUSION`, `LOITERING`, `SUSPICIOUS_VEHICLE`, zone geometry, deduplication (Slice 7)
-- **Multi-camera orchestration (Phase 2)**: up to 4 simultaneous, fully isolated `PipelineSession`s via `CameraManager`; add a camera by uploading a video from the dashboard; remove/restart per camera; one camera's failure never affects another or crashes the process
+- **Multi-camera orchestration (Phase 2)**: up to 4 simultaneous, fully isolated `PipelineSession`s via `CameraManager` — recorded video *or* live local webcam/USB sources; add/remove/restart per camera; one camera's failure never affects another or crashes the process
+- **Decoupled video streaming (Phase 2.1)**: frame capture/MJPEG display runs independently of AI inference (configurable `--ai-fps` / `VISION_AI_FPS`, default 8), so display never waits on inference; optional CUDA acceleration for YOLO + face recognition (`docs/GPU_SETUP.md`)
+- **Operational Intelligence (Phase 3)** — see `docs/PHASE3.md` for full detail:
+  - Persistent event/alert store (SQLite) — events and alerts survive a backend restart
+  - Alert lifecycle: `NEW → ACKNOWLEDGED → RESOLVED`, enforced server-side, actionable from the dashboard
+  - Historical Event Search with camera/type/severity/status filters
+  - Incident Investigation: real captured event snapshot, incident timeline, related events (same camera+track)
+  - Entity Investigation: a recognized person's events across cameras, or an unrecognized person/vehicle by (camera, track)
+  - Zone Management from the dashboard: create/edit/delete/enable-disable zones by drawing on the live feed, backed by the same SQLite store (YAML zone files now only seed a camera's zones once)
 - FastAPI backend (`backend/main.py`) serving per-camera and global-aggregate live state as JSON + per-camera MJPEG — no mock/parallel implementation
-- React + Vite dashboard: 4-camera grid (hero), click-to-focus single-camera view, global alerts/stats/event timeline tagged by camera, camera management (add/remove/restart), honest per-camera status indicators
+- React + Vite dashboard, redesigned as a white/navy SOC command center: sidebar navigation (Dashboard/Alerts/Event History/Zones), 4-camera grid (hero), click-to-focus single-camera view, camera management (add/remove/restart), honest per-camera status indicators
 - A calibrated, verified-working golden 4-camera video/zone lineup (see §7)
 
 ## FUTURE / PLANNED
 
 - Production authentication, cloud deployment, WebRTC, message queues/Kafka/Redis, Kubernetes/GPU orchestration — intentionally **not** built; out of scope for this MVP
-- Real IP camera/RTSP ingestion — only local video files are supported; `VideoSource`/`PipelineSession` would need a new source abstraction for it
-- PostgreSQL persistence exists (`src/face/vector_db.py`) but is optional and off by default; not required for the dashboard
+- Real IP camera/RTSP ingestion — only local video files and local webcam/USB devices are supported; `VideoSource`/`PipelineSession` would need a new source abstraction for RTSP
+- PostgreSQL persistence exists (`src/face/vector_db.py`, optional face-gallery storage) alongside Phase 3's SQLite event/alert/zone store — the two are unrelated and both off/on independently
 - Adaptive/quality-aware face-recognition thresholds (documented as a known limitation in `docs/PROJECT_SUMMARY.md`, not implemented)
 - Verified ANPR with a real OCR engine on a confirmed-legible plate
-- Interactive alert Acknowledge/Resolve controls, historical event search/archive — the `status` field is already returned for display; changing it needs a new `POST` endpoint that doesn't exist today
-- Per-camera zone upload in the Add Camera flow — an uploaded video currently runs with no zone file (no event detection) until one is added manually to `configs/` and the camera is reconfigured
+- True cross-camera person re-identification — a recognized identity's events are aggregated across cameras, but the system never claims to have proven the same *unrecognized* person moved between cameras (see `docs/PHASE3.md` §"Investigation workflow")
 
 ---
 

@@ -70,21 +70,94 @@ export interface GlobalDetections {
 }
 
 export type Severity = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+export type AlertLifecycleStatus = "NEW" | "ACKNOWLEDGED" | "RESOLVED";
 
-/** One security alert (GET /events global, GET /cameras/{id}/events). */
+/** One operator alert (GET /alerts, GET /alerts/{id}, GET /cameras/{id}/events).
+ * Persistent (SQLite) and lifecycle-managed as of Phase 3 — see docs/PHASE3.md. */
 export interface AlertItem {
   alert_id: string;
   event_id: string;
   camera_id: string;
   camera_name: string;
+  event_type: string | null;
   severity: Severity;
   title: string;
   message: string;
-  status: "NEW" | "ACKNOWLEDGED" | "RESOLVED";
-  timestamp: number;
+  status: AlertLifecycleStatus;
+  /** Video-relative seconds (the clip's own clock), same convention as before. */
+  timestamp: number | null;
+  /** Wall-clock ISO8601 — survives a restart, unlike `timestamp`. */
+  created_at: string;
+  acknowledged_at: string | null;
+  resolved_at: string | null;
+  zone_id: string | null;
   zone_name: string | null;
   object_type: string | null;
   track_id: number | null;
+  identity: string | null;
+}
+
+/** One historical event row (GET /events, GET /events/{id}). */
+export interface EventItem {
+  event_id: string;
+  camera_id: string;
+  camera_name: string;
+  source_type: SourceType | null;
+  event_type: string;
+  severity: Severity;
+  timestamp: number;
+  created_at: string;
+  track_id: number | null;
+  identity: string | null;
+  zone_id: string | null;
+  zone_name: string | null;
+  description: string;
+  metadata: Record<string, unknown>;
+  has_snapshot: boolean;
+}
+
+/** GET /investigations/event/{event_id}. */
+export interface EventInvestigation {
+  event: EventItem;
+  alert: AlertItem | null;
+  related_events: EventItem[];
+}
+
+/** GET /investigations/person/{identity}. */
+export interface PersonInvestigation {
+  identity: string;
+  recognized: true;
+  cameras: string[];
+  last_seen: string;
+  events: EventItem[];
+}
+
+/** GET /investigations/track/{camera_id}/{track_id} — an unrecognized
+ * person or a vehicle, identified only by where the pipeline actually saw
+ * it (never a fabricated cross-camera identity). */
+export interface TrackInvestigation {
+  camera_id: string;
+  track_id: number;
+  object_type: string | null;
+  identity: string | null;
+  last_seen: string;
+  plate: string | null;
+  plate_confidence: number | null;
+  events: EventItem[];
+}
+
+export type ZoneType = "restricted" | "warning" | "monitored";
+
+/** One surveillance zone (GET/POST/PUT/DELETE /zones). */
+export interface ZoneItem {
+  id: string;
+  camera_id: string;
+  name: string;
+  type: ZoneType;
+  polygon: [number, number][];
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
 }
 
 /** Which device each pipeline stage is actually running on, and the

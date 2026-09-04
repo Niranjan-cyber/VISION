@@ -37,6 +37,7 @@ from src.core.types import FaceDetection, IdentityMatch, PlateRecognitionResult,
 from src.face.association import FaceTrackAssociation
 from src.main import draw_annotations
 from src.pipeline.session import FrameResult, PipelineSession
+from src.storage import AlertRepository, Database, EventPersistenceService, EventRepository, ZoneRepository, get_database
 
 MAX_ACTIVE_CAMERAS = 4
 JPEG_QUALITY = 80
@@ -108,10 +109,17 @@ class CameraSession:
     owns init/restart/stop and failure isolation.
     """
 
-    def __init__(self, config: CameraConfig):
+    def __init__(
+        self,
+        config: CameraConfig,
+        zone_repo: Optional[ZoneRepository] = None,
+        persistence_service: Optional[EventPersistenceService] = None,
+    ):
         self.config = config
         self.camera_id = config.camera_id
         self.camera_name = config.camera_name
+        self.zone_repo = zone_repo
+        self.persistence_service = persistence_service
 
         self._lock = threading.Lock()
         self._status = CameraStatus.STARTING
@@ -167,6 +175,20 @@ class CameraSession:
     def request_restart(self) -> None:
         self._restart_flag.set()
 
+    def refresh_zones(self) -> bool:
+        """Reloads this camera's zones from the zone repository and pushes
+        them into the running event engine — used after a zone is created/
+        edited/deleted/toggled via the API. Returns False if the camera has
+        no session yet (still starting) rather than raising, since that's a
+        normal, transient state, not an error."""
+        with self._lock:
+            session = self._session
+        if session is None:
+            return False
+        with self._pipeline_lock:
+            session.refresh_zones()
+        return True
+
     def stop(self) -> None:
         """Signals the worker thread to stop and blocks briefly for a clean shutdown."""
         self._stop_flag.set()
@@ -194,6 +216,7 @@ class CameraSession:
                 camera_id=self.camera_id,
                 device=cfg.device,
                 verbose=False,
+                zone_repo=self.zone_repo,
             )
             if cfg.source_type == "live":
                 session = PipelineSession(device_index=cfg.device_index, **common)
@@ -409,19 +432,66 @@ class CameraSession:
                     self._latest_result = result
                     self._latest_overlay = overlay
 
+                if result and result.new_events and self.persistence_service is not None:
+                    self._persist_new_events(session, frame, overlay, result)
+
             elapsed = time.time() - loop_start
             sleep_for = ai_interval - elapsed
             time.sleep(sleep_for if sleep_for > 0 else 0.01)
 
+    def _persist_new_events(self, session: PipelineSession, frame, overlay: "_OverlayState", result: FrameResult) -> None:
+        """Persists this cycle's new events/alerts, snapshotting the
+        annotated frame first. Runs inside the AI thread — already off the
+        capture/render path — and is fully best-effort: any failure here is
+        logged and swallowed so a database or disk problem can never take
+        down this camera's pipeline (or, since each camera is isolated, any
+        other camera's)."""
+        try:
+            annotated = draw_annotations(
+                frame=frame,
+                tracks=overlay.tracks,
+                faces=overlay.faces,
+                associations=overlay.associations,
+                track_identity_map=overlay.track_identity_map,
+                plates=overlay.plates,
+                track_plate_map=overlay.track_plate_map,
+                zones=session.zones,
+                breached_zone_ids=overlay.breached_zone_ids,
+            )
+        except Exception as e:
+            print(f"[CAMERA {self.camera_id}] failed to build event snapshot: {e}", file=sys.stderr)
+            annotated = None
+
+        try:
+            self.persistence_service.record(
+                camera_id=self.camera_id,
+                camera_name=self.camera_name,
+                source_type=self.config.source_type,
+                new_events=result.new_events,
+                new_alerts=result.new_alerts,
+                annotated_frame=annotated,
+            )
+        except Exception as e:
+            print(f"[CAMERA {self.camera_id}] failed to persist events: {e}", file=sys.stderr)
+
 
 class CameraManager:
     """Owns every CameraSession. All mutation goes through this class so the
-    active-camera count and camera_id allocation stay consistent."""
+    active-camera count and camera_id allocation stay consistent. Also owns
+    the Phase 3 event/alert/zone store — one Database per manager, shared by
+    every camera it starts, so the API layer (backend/main.py) can read the
+    same repositories a CameraSession's AI thread just wrote to."""
 
-    def __init__(self):
+    def __init__(self, db_path: Optional[str] = None):
         self._lock = threading.Lock()
         self._cameras: "OrderedDict[str, CameraSession]" = OrderedDict()
         self._next_camera_num = 1
+
+        self.db: Database = Database(db_path) if db_path else get_database()
+        self.event_repo = EventRepository(self.db)
+        self.alert_repo = AlertRepository(self.db)
+        self.zone_repo = ZoneRepository(self.db)
+        self.persistence_service = EventPersistenceService(self.event_repo, self.alert_repo)
 
     def add_camera(
         self,
@@ -469,7 +539,8 @@ class CameraManager:
                 device=device,
                 ai_fps=ai_fps,
             )
-            session = CameraSession(config)  # spawns its own thread; safe under this lock
+            # spawns its own thread; safe under this lock
+            session = CameraSession(config, zone_repo=self.zone_repo, persistence_service=self.persistence_service)
             self._cameras[camera_id] = session
             return session
 
@@ -487,6 +558,15 @@ class CameraManager:
             return False
         cam.request_restart()
         return True
+
+    def refresh_camera_zones(self, camera_id: str) -> bool:
+        """Tells a running camera to reload its zones from ZoneRepository —
+        called by the zone-management API after a create/update/delete/
+        enable/disable so the change takes effect without a restart."""
+        cam = self.get(camera_id)
+        if cam is None:
+            return False
+        return cam.refresh_zones()
 
     def get(self, camera_id: str) -> Optional[CameraSession]:
         with self._lock:

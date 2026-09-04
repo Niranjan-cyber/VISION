@@ -9,10 +9,17 @@ model-loading cost down (each real camera takes several seconds to spin up).
 """
 import os
 import sys
+import tempfile
 import time
 import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+# Isolated Phase 3 event/alert/zone database for this whole module, so real
+# cameras spun up here never write test data into the shared demo database
+# (data/vision.db) or race other test modules writing to it concurrently.
+os.environ["VISION_DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="vision_test_camera_manager_db_"), "test.db")
+os.environ["VISION_SNAPSHOT_DIR"] = tempfile.mkdtemp(prefix="vision_test_camera_manager_snapshots_")
 
 from src.pipeline.camera_manager import CameraLimitReached, CameraManager, MAX_ACTIVE_CAMERAS
 from src.pipeline.session import PipelineSession

@@ -4,6 +4,12 @@ import type {
   CameraDetectionState,
   CameraDevice,
   CameraSummary,
+  EventInvestigation,
+  EventItem,
+  PersonInvestigation,
+  TrackInvestigation,
+  ZoneItem,
+  ZoneType,
   GlobalDetections,
   GlobalStatus,
 } from "./types";
@@ -19,6 +25,28 @@ async function getJSON<T>(path: string): Promise<T> {
     throw new Error(body.detail ?? body.error ?? `${res.status} ${res.statusText}`);
   }
   return res.json();
+}
+
+async function sendJSON<T>(path: string, method: "POST" | "PUT" | "DELETE", body?: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method,
+    headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const parsed = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(parsed.detail ?? `${res.status} ${res.statusText}`);
+  }
+  return parsed as T;
+}
+
+function toQuery(params: object): string {
+  const usp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params as Record<string, string | number | undefined | null>)) {
+    if (v !== undefined && v !== null && v !== "") usp.set(k, String(v));
+  }
+  const qs = usp.toString();
+  return qs ? `?${qs}` : "";
 }
 
 /** Polls an endpoint on an interval. Keeps the last good value on a failed
@@ -65,8 +93,11 @@ export function useGlobalDetections(intervalMs = 700) {
   return usePolling<GlobalDetections>("/detections", intervalMs);
 }
 
-export function useGlobalEvents(intervalMs = 1200) {
-  return usePolling<AlertItem[]>("/events", intervalMs);
+/** Live operator alert feed — GET /alerts (persistent, lifecycle-managed).
+ * Renamed from useGlobalEvents: GET /events now means historical search,
+ * not the live feed — see docs/PHASE3.md. */
+export function useGlobalAlerts(intervalMs = 1200) {
+  return usePolling<AlertItem[]>("/alerts", intervalMs);
 }
 
 export function useGlobalStatus(intervalMs = 2000) {
@@ -128,4 +159,84 @@ export function findCameraDetections(
 ): CameraDetectionState | null {
   if (!global) return null;
   return global.cameras.find((c) => c.camera_id === cameraId) ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — Alert management
+// ---------------------------------------------------------------------------
+export async function acknowledgeAlert(alertId: string): Promise<AlertItem> {
+  return sendJSON<AlertItem>(`/alerts/${encodeURIComponent(alertId)}/acknowledge`, "POST");
+}
+
+export async function resolveAlert(alertId: string): Promise<AlertItem> {
+  return sendJSON<AlertItem>(`/alerts/${encodeURIComponent(alertId)}/resolve`, "POST");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — Historical event search
+// ---------------------------------------------------------------------------
+export interface EventSearchFilters {
+  camera_id?: string;
+  event_type?: string;
+  severity?: string;
+  status?: string;
+  identity?: string;
+  start_time?: string;
+  end_time?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export async function searchEvents(filters: EventSearchFilters = {}): Promise<EventItem[]> {
+  return getJSON<EventItem[]>(`/events${toQuery(filters)}`);
+}
+
+export async function fetchEvent(eventId: string): Promise<EventItem> {
+  return getJSON<EventItem>(`/events/${encodeURIComponent(eventId)}`);
+}
+
+export function eventSnapshotUrl(eventId: string): string {
+  return `${API_BASE}/events/${encodeURIComponent(eventId)}/snapshot`;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — Investigation
+// ---------------------------------------------------------------------------
+export async function fetchEventInvestigation(eventId: string): Promise<EventInvestigation> {
+  return getJSON<EventInvestigation>(`/investigations/event/${encodeURIComponent(eventId)}`);
+}
+
+export async function fetchPersonInvestigation(identity: string): Promise<PersonInvestigation> {
+  return getJSON<PersonInvestigation>(`/investigations/person/${encodeURIComponent(identity)}`);
+}
+
+export async function fetchTrackInvestigation(cameraId: string, trackId: number): Promise<TrackInvestigation> {
+  return getJSON<TrackInvestigation>(`/investigations/track/${encodeURIComponent(cameraId)}/${trackId}`);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — Zone management
+// ---------------------------------------------------------------------------
+export async function fetchZones(cameraId?: string): Promise<ZoneItem[]> {
+  return getJSON<ZoneItem[]>(`/zones${toQuery({ camera_id: cameraId })}`);
+}
+
+export async function createZone(
+  cameraId: string,
+  name: string,
+  type: ZoneType,
+  polygon: [number, number][]
+): Promise<ZoneItem> {
+  return sendJSON<ZoneItem>("/zones", "POST", { camera_id: cameraId, name, type, polygon, enabled: true });
+}
+
+export async function updateZone(
+  zoneId: string,
+  changes: Partial<{ name: string; type: ZoneType; polygon: [number, number][]; enabled: boolean }>
+): Promise<ZoneItem> {
+  return sendJSON<ZoneItem>(`/zones/${encodeURIComponent(zoneId)}`, "PUT", changes);
+}
+
+export async function deleteZone(zoneId: string): Promise<void> {
+  await sendJSON(`/zones/${encodeURIComponent(zoneId)}`, "DELETE");
 }

@@ -47,6 +47,10 @@ data/face_gallery/*
 !data/face_gallery/.gitkeep
 data/uploads/*
 !data/uploads/.gitkeep
+# Phase 3 event snapshots — generated at runtime, referenced by path from
+# the SQLite events table (data/vision.db, already ignored via *.db below).
+data/events/*
+!data/events/.gitkeep
 *.mp4
 *.avi
 *.mov

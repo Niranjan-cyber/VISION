@@ -1,6 +1,6 @@
-import { Bell, LayoutDashboard, ListTree, ShieldCheck } from "lucide-react";
+import { Bell, LayoutDashboard, ListTree, MapPinned, ShieldCheck } from "lucide-react";
 
-export type NavSection = "dashboard" | "alerts" | "events";
+export type NavSection = "dashboard" | "alerts" | "events" | "zones";
 
 interface Props {
   active: NavSection;
@@ -15,7 +15,8 @@ interface Props {
 const NAV_ITEMS: { id: NavSection; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { id: "alerts", label: "Alerts", icon: Bell },
-  { id: "events", label: "Events", icon: ListTree },
+  { id: "events", label: "Event History", icon: ListTree },
+  { id: "zones", label: "Zones", icon: MapPinned },
 ];
 
 export default function Sidebar({

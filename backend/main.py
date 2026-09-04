@@ -20,25 +20,27 @@ import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from pydantic import BaseModel
 
 from src.core.device import resolve_yolo_device
+from src.events.types import AlertStatus
 from src.ingestion.video import discover_camera_devices
 from src.pipeline.camera_manager import AI_FPS_DEFAULT, CameraLimitReached, CameraManager, MAX_ACTIVE_CAMERAS
 from src.pipeline.serialize import (
     serialize_camera_summary,
     serialize_events,
     serialize_global_detections,
-    serialize_global_events,
     serialize_global_status,
     serialize_state,
 )
+from src.storage import InvalidAlertTransition, StoredAlert, StoredEvent, StoredZone
 
 # ---------------------------------------------------------------------------
 # Golden demo configuration.
@@ -174,9 +176,13 @@ def global_detections():
     return serialize_global_detections(camera_manager)
 
 
-@app.get("/events")
-def global_events():
-    return serialize_global_events(camera_manager)
+# NOTE: GET /events used to return the live in-memory alert feed (Phase 2).
+# Phase 3 splits that cleanly in two: GET /alerts is the operator-facing,
+# persistent, lifecycle-managed alert feed (below); GET /events is now
+# historical event search over the same persistent store. serialize_events/
+# serialize_global_events (src/pipeline/serialize.py) are unchanged and
+# still used by GET /cameras/{id}/events, which keeps its original
+# in-memory-per-camera contract.
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +314,324 @@ def camera_events(camera_id: str):
     if session is None:
         return JSONResponse(status_code=503, content={"error": cam.error or "camera is still starting"})
     return serialize_events(session, cam.camera_id, cam.camera_name)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — serialization helpers (DB rows -> API JSON)
+# ---------------------------------------------------------------------------
+def _serialize_event(event: StoredEvent) -> Dict[str, Any]:
+    return {
+        "event_id": event.id,
+        "camera_id": event.camera_id,
+        "camera_name": event.camera_name,
+        "source_type": event.source_type,
+        "event_type": event.event_type,
+        "severity": event.severity,
+        "timestamp": event.timestamp,
+        "created_at": event.created_at,
+        "track_id": event.track_id,
+        "identity": event.identity,
+        "zone_id": event.zone_id,
+        "zone_name": event.zone_name,
+        "description": event.description,
+        "metadata": event.metadata,
+        "has_snapshot": bool(event.snapshot_path) and os.path.exists(event.snapshot_path),
+    }
+
+
+def _serialize_alert(alert: StoredAlert, event: Optional[StoredEvent]) -> Dict[str, Any]:
+    """Alerts and events are separate rows (see docs/PHASE3.md) — this joins
+    them for display so the API keeps returning the zone/track/identity
+    fields the frontend already expects from an alert, without duplicating
+    that data into the alerts table itself."""
+    return {
+        "alert_id": alert.id,
+        "event_id": alert.event_id,
+        "camera_id": alert.camera_id,
+        "camera_name": alert.camera_name,
+        "event_type": event.event_type if event else None,
+        "severity": alert.severity,
+        "title": alert.title,
+        "message": alert.message,
+        "status": alert.status,
+        "timestamp": event.timestamp if event else None,
+        "created_at": alert.created_at,
+        "acknowledged_at": alert.acknowledged_at,
+        "resolved_at": alert.resolved_at,
+        "zone_id": event.zone_id if event else None,
+        "zone_name": event.zone_name if event else None,
+        "track_id": event.track_id if event else None,
+        "identity": event.identity if event else None,
+        "object_type": (event.metadata.get("object_type") if event else None),
+    }
+
+
+def _serialize_zone(zone: StoredZone) -> Dict[str, Any]:
+    return {
+        "id": zone.id,
+        "camera_id": zone.camera_id,
+        "name": zone.name,
+        "type": zone.type,
+        "polygon": [list(p) for p in zone.polygon],
+        "enabled": zone.enabled,
+        "created_at": zone.created_at,
+        "updated_at": zone.updated_at,
+    }
+
+
+def _sync_in_memory_alert_status(alert: StoredAlert, target_status: str) -> None:
+    """Acknowledge/resolve must also be reflected on the live camera's
+    in-memory EventEngine.active_alerts (which GET /cameras/{id}/events
+    still reads — see the note above) — otherwise an operator who
+    acknowledges via the global Alerts page would see a stale NEW badge on
+    the camera's own focus view. Best-effort: the persistent DB row (the
+    real source of truth) is already updated by this point regardless."""
+    cam = camera_manager.get(alert.camera_id)
+    if cam is None:
+        return
+    session, _ = cam.snapshot()
+    if session is None or session.event_engine is None:
+        return
+    for a in session.event_engine.active_alerts:
+        if a.alert_id == alert.id:
+            a.status = AlertStatus(target_status)
+            break
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Alert management (persistent, filterable, lifecycle-managed)
+# ---------------------------------------------------------------------------
+@app.get("/alerts")
+def list_alerts(
+    camera_id: Optional[str] = None,
+    severity: Optional[str] = None,
+    status: Optional[str] = None,
+    event_type: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    alerts = camera_manager.alert_repo.query(
+        camera_id=camera_id, severity=severity, status=status, event_type=event_type,
+        start_time=start_time, end_time=end_time, limit=limit, offset=offset,
+    )
+    return [_serialize_alert(a, camera_manager.event_repo.get(a.event_id)) for a in alerts]
+
+
+@app.get("/alerts/{alert_id}")
+def get_alert(alert_id: str):
+    alert = camera_manager.alert_repo.get(alert_id)
+    if alert is None:
+        raise HTTPException(status_code=404, detail=f"No alert with id '{alert_id}'")
+    return _serialize_alert(alert, camera_manager.event_repo.get(alert.event_id))
+
+
+@app.post("/alerts/{alert_id}/acknowledge")
+def acknowledge_alert(alert_id: str):
+    try:
+        alert = camera_manager.alert_repo.transition(alert_id, "ACKNOWLEDGED")
+    except InvalidAlertTransition as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    _sync_in_memory_alert_status(alert, "ACKNOWLEDGED")
+    return _serialize_alert(alert, camera_manager.event_repo.get(alert.event_id))
+
+
+@app.post("/alerts/{alert_id}/resolve")
+def resolve_alert(alert_id: str):
+    try:
+        alert = camera_manager.alert_repo.transition(alert_id, "RESOLVED")
+    except InvalidAlertTransition as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    _sync_in_memory_alert_status(alert, "RESOLVED")
+    return _serialize_alert(alert, camera_manager.event_repo.get(alert.event_id))
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Historical event search
+# ---------------------------------------------------------------------------
+@app.get("/events")
+def list_events(
+    camera_id: Optional[str] = None,
+    event_type: Optional[str] = None,
+    severity: Optional[str] = None,
+    identity: Optional[str] = None,
+    track_id: Optional[int] = None,
+    status: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    events = camera_manager.event_repo.query(
+        camera_id=camera_id, event_type=event_type, severity=severity, identity=identity,
+        track_id=track_id, status=status, start_time=start_time, end_time=end_time,
+        limit=limit, offset=offset,
+    )
+    return [_serialize_event(e) for e in events]
+
+
+@app.get("/events/{event_id}")
+def get_event(event_id: str):
+    event = camera_manager.event_repo.get(event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail=f"No event with id '{event_id}'")
+    return _serialize_event(event)
+
+
+@app.get("/events/{event_id}/snapshot")
+def get_event_snapshot(event_id: str):
+    event = camera_manager.event_repo.get(event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail=f"No event with id '{event_id}'")
+    if not event.snapshot_path or not os.path.exists(event.snapshot_path):
+        raise HTTPException(status_code=404, detail="No snapshot available for this event")
+    return FileResponse(event.snapshot_path, media_type="image/jpeg")
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Incident investigation
+# ---------------------------------------------------------------------------
+@app.get("/investigations/event/{event_id}")
+def investigate_event(event_id: str):
+    event = camera_manager.event_repo.get(event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail=f"No event with id '{event_id}'")
+
+    alert = camera_manager.alert_repo.get_by_event(event_id)
+    related: List[StoredEvent] = []
+    if event.track_id is not None:
+        related = camera_manager.event_repo.related_to(event.camera_id, event.track_id, exclude_event_id=event_id)
+
+    return {
+        "event": _serialize_event(event),
+        "alert": _serialize_alert(alert, event) if alert else None,
+        "related_events": [_serialize_event(e) for e in related],
+    }
+
+
+@app.get("/investigations/person/{identity}")
+def investigate_person(identity: str):
+    """Aggregates a *recognized* identity's events across every camera it
+    was seen on. 'UNKNOWN' is not a real identity — see
+    /investigations/track for an unrecognized person or a vehicle, the only
+    honest identifier the pipeline has for either."""
+    if identity.strip().upper() == "UNKNOWN":
+        raise HTTPException(
+            status_code=400,
+            detail="'UNKNOWN' is not a specific identity — use /investigations/track/{camera_id}/{track_id} instead",
+        )
+    events = camera_manager.event_repo.for_identity(identity, limit=200)
+    if not events:
+        raise HTTPException(status_code=404, detail=f"No events found for identity '{identity}'")
+    cameras_seen = sorted({e.camera_id for e in events})
+    last_seen = events[0].created_at  # for_identity() orders newest first
+    return {
+        "identity": identity,
+        "recognized": True,
+        "cameras": cameras_seen,
+        "last_seen": last_seen,
+        "events": [_serialize_event(e) for e in events],
+    }
+
+
+@app.get("/investigations/track/{camera_id}/{track_id}")
+def investigate_track(camera_id: str, track_id: int):
+    """Investigation for a single (camera, track) — the identifier the
+    pipeline actually has for an unrecognized person or any vehicle. Never
+    claims cross-camera identity for an entity the system can't recognize."""
+    events = camera_manager.event_repo.related_to(camera_id, track_id, limit=200)
+    if not events:
+        raise HTTPException(status_code=404, detail=f"No events found for camera '{camera_id}' track #{track_id}")
+    latest = events[-1]  # related_to() orders oldest first
+    return {
+        "camera_id": camera_id,
+        "track_id": track_id,
+        "object_type": latest.metadata.get("object_type"),
+        "identity": latest.identity,
+        "last_seen": latest.created_at,
+        "plate": latest.metadata.get("plate"),
+        "plate_confidence": latest.metadata.get("plate_confidence"),
+        "events": [_serialize_event(e) for e in events],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Zone management
+# ---------------------------------------------------------------------------
+class ZoneCreateRequest(BaseModel):
+    camera_id: str
+    name: str
+    type: str = "restricted"
+    polygon: List[List[int]]
+    enabled: bool = True
+
+
+class ZoneUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    type: Optional[str] = None
+    polygon: Optional[List[List[int]]] = None
+    enabled: Optional[bool] = None
+
+
+@app.get("/zones")
+def list_zones(camera_id: Optional[str] = None):
+    if camera_id:
+        zones = camera_manager.zone_repo.list_for_camera(camera_id)
+    else:
+        zones = []
+        for cam in camera_manager.list_cameras():
+            zones.extend(camera_manager.zone_repo.list_for_camera(cam.camera_id))
+    return [_serialize_zone(z) for z in zones]
+
+
+@app.get("/zones/{zone_id}")
+def get_zone(zone_id: str):
+    zone = camera_manager.zone_repo.get(zone_id)
+    if zone is None:
+        raise HTTPException(status_code=404, detail=f"No zone with id '{zone_id}'")
+    return _serialize_zone(zone)
+
+
+@app.post("/zones")
+def create_zone(body: ZoneCreateRequest):
+    _camera_or_404(body.camera_id)
+    zone_id = f"zone_{uuid.uuid4().hex[:10]}"
+    try:
+        zone = camera_manager.zone_repo.create(zone_id, body.camera_id, body.name, body.type, body.polygon, body.enabled)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    camera_manager.refresh_camera_zones(body.camera_id)
+    return _serialize_zone(zone)
+
+
+@app.put("/zones/{zone_id}")
+def update_zone(zone_id: str, body: ZoneUpdateRequest):
+    existing = camera_manager.zone_repo.get(zone_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"No zone with id '{zone_id}'")
+    try:
+        zone = camera_manager.zone_repo.update(
+            zone_id, name=body.name, zone_type=body.type, polygon=body.polygon, enabled=body.enabled,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    camera_manager.refresh_camera_zones(existing.camera_id)
+    return _serialize_zone(zone)
+
+
+@app.delete("/zones/{zone_id}")
+def delete_zone(zone_id: str):
+    existing = camera_manager.zone_repo.get(zone_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"No zone with id '{zone_id}'")
+    camera_manager.zone_repo.delete(zone_id)
+    camera_manager.refresh_camera_zones(existing.camera_id)
+    return {"deleted": zone_id}
 
 
 def _mjpeg_generator(cam):
