@@ -19,6 +19,10 @@ export default function CameraDetail({ camera, alerts, onBack }: Props) {
         </button>
         <div className="camera-detail-title">
           <span className="mono">{camera.camera_id}</span> — {camera.camera_name.toUpperCase()}
+          <span className={`source-type-badge source-type-${camera.source_type}`}>
+            {camera.source_type === "live" ? "● LIVE" : "RECORDED"}
+          </span>
+          {!camera.has_zone && <span className="no-zone-badge">NO ZONE CONFIGURED</span>}
         </div>
         <span className={`cam-status-pill cam-status-${camera.camera_status}`}>
           <span className="dot" />
@@ -29,7 +33,7 @@ export default function CameraDetail({ camera, alerts, onBack }: Props) {
       <div className="main-grid">
         <div className="panel video-panel">
           <div className="panel-header">
-            <span>LIVE SURVEILLANCE</span>
+            <span>SURVEILLANCE FEED</span>
           </div>
           {camera.camera_status === "online" ? (
             <VideoFeed streamUrl={cameraStreamUrl(camera.camera_id)} alt={`Live feed — ${camera.camera_name}`} />

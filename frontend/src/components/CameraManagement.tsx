@@ -51,6 +51,9 @@ export default function CameraManagement({ cameras, maxSlots, onFocusCamera, onA
             <button className="mgmt-name-btn" onClick={() => onFocusCamera(cam.camera_id)}>
               {cam.camera_name}
             </button>
+            <span className={`source-type-badge source-type-${cam.source_type}`}>
+              {cam.source_type === "live" ? "● LIVE" : "RECORDED"}
+            </span>
             <span className="mgmt-source mono">{cam.video_source.split(/[\\/]/).pop()}</span>
             <span className="mgmt-status">{cam.status.toUpperCase()}</span>
             <span className="mgmt-actions">

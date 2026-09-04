@@ -98,7 +98,8 @@ class PipelineSession:
 
     def __init__(
         self,
-        video_path: str,
+        video_path: Optional[str] = None,
+        device_index: Optional[int] = None,
         model: str = "yolo11n.pt",
         confidence: float = 0.25,
         face_confidence: float = 0.50,
@@ -123,7 +124,13 @@ class PipelineSession:
         device: str = "auto",
         verbose: bool = True,
     ):
+        if (video_path is None) == (device_index is None):
+            raise PipelineSubsystemError(
+                "video", "PipelineSession requires exactly one of video_path or device_index"
+            )
         self.video_path = video_path
+        self.device_index = device_index
+        self.is_live = device_index is not None
         self.model_name = model
         self.confidence = confidence
         self.device_pref = device
@@ -156,11 +163,15 @@ class PipelineSession:
 
         # 1. Ingestion
         try:
-            self.source = VideoSource(video_path)
+            if self.is_live:
+                self.source = VideoSource(device_index=device_index)
+            else:
+                self.source = VideoSource(video_path=video_path)
         except (FileNotFoundError, ValueError) as e:
             raise PipelineSubsystemError("video", str(e)) from e
+        source_label = f"live camera device {device_index}" if self.is_live else video_path
         self._log(
-            f"[INFO] Video loaded successfully. Resolution: {self.source.width}x{self.source.height}, "
+            f"[INFO] Video loaded successfully ({source_label}). Resolution: {self.source.width}x{self.source.height}, "
             f"FPS: {self.source.fps:.2f}, Total Frames: {self.source.frame_count}"
         )
 
@@ -615,10 +626,17 @@ class PipelineSession:
         )
 
     def restart(self) -> None:
-        """Reopens the video source from the beginning and resets per-run
-        cumulative state, so the golden demo clip can loop continuously."""
+        """Reopens the video source and resets per-run cumulative state. For
+        a recorded clip this reopens the file from the beginning (so the
+        golden demo clip can loop continuously); for a live camera this
+        attempts to reopen the physical device (used to recover from a
+        disconnect — never auto-looped, only called on EOF for a file or on
+        an explicit user-requested restart for a live camera)."""
         self.source.release()
-        self.source = VideoSource(self.video_path)
+        if self.is_live:
+            self.source = VideoSource(device_index=self.device_index)
+        else:
+            self.source = VideoSource(video_path=self.video_path)
         self.tracker.reset()
         self.track_identity_cache.clear()
         self.track_plate_map.clear()

@@ -10,7 +10,7 @@ interface Props {
 
 const STATUS_LABEL: Record<string, string> = {
   starting: "STARTING",
-  online: "LIVE",
+  online: "ONLINE",
   stopped: "STOPPED",
   error: "ERROR",
 };
@@ -29,7 +29,12 @@ export default function CameraCard({ camera, alerts, onFocus }: Props) {
       <div className="camera-card-head">
         <div>
           <div className="camera-card-name">{camera.camera_name}</div>
-          <div className="camera-card-id mono">{camera.camera_id}</div>
+          <div className="camera-card-id mono">
+            {camera.camera_id}
+            <span className={`source-type-badge source-type-${camera.source_type}`}>
+              {camera.source_type === "live" ? "● LIVE" : "RECORDED"}
+            </span>
+          </div>
         </div>
         <span className={`cam-status-pill cam-status-${camera.camera_status}`}>
           <span className="dot" />
@@ -53,7 +58,9 @@ export default function CameraCard({ camera, alerts, onFocus }: Props) {
       </div>
 
       <div className="camera-card-foot">
-        <span className="cam-foot-item">{activeZone ?? "No active zone"}</span>
+        <span className={`cam-foot-item ${!camera.has_zone ? "cam-foot-no-zone" : ""}`}>
+          {camera.has_zone ? activeZone ?? "No active zone" : "NO ZONE CONFIGURED"}
+        </span>
         <span className="cam-foot-item mono">
           {camera.statistics.persons}p · {camera.statistics.vehicles}v
         </span>

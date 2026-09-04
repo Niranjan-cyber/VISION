@@ -142,11 +142,18 @@ def serialize_camera_summary(camera) -> Dict[str, Any]:
     """Builds one entry of the GET /cameras list. `camera` is a CameraSession —
     typed loosely here to avoid a circular import with camera_manager."""
     session, _ = camera.snapshot()
+    cfg = camera.config
+    display_source = (
+        f"Camera {cfg.device_index} (live)" if cfg.source_type == "live" else cfg.video_path
+    )
     summary: Dict[str, Any] = {
         "camera_id": camera.camera_id,
         "camera_name": camera.camera_name,
-        "video_source": camera.config.video_path,
-        "zones_path": camera.config.zones_path,
+        "source_type": cfg.source_type,
+        "video_source": display_source,
+        "device_index": cfg.device_index,
+        "zones_path": cfg.zones_path,
+        "has_zone": cfg.zones_path is not None,
         "status": camera.status,
         "error": camera.error,
     }
@@ -182,7 +189,12 @@ def serialize_global_status(manager) -> Dict[str, Any]:
         "cameras_active": len(cameras),
         "cameras_max": MAX_ACTIVE_CAMERAS,
         "cameras": {
-            cam.camera_id: {"camera_name": cam.camera_name, "status": cam.status, "error": cam.error}
+            cam.camera_id: {
+                "camera_name": cam.camera_name,
+                "status": cam.status,
+                "error": cam.error,
+                "source_type": cam.config.source_type,
+            }
             for cam in cameras
         },
     }
@@ -206,6 +218,8 @@ def serialize_global_detections(manager) -> Dict[str, Any]:
             "camera_id": cam.camera_id,
             "camera_name": cam.camera_name,
             "camera_status": cam.status,
+            "source_type": cam.config.source_type,
+            "has_zone": cam.config.zones_path is not None,
             **cam_state,
         })
         for k in totals:

@@ -14,7 +14,7 @@ export default function CameraGrid({ cameras, alerts, onFocusCamera, maxSlots }:
   return (
     <div className="panel camera-grid-panel">
       <div className="panel-header">
-        <span>LIVE SURVEILLANCE — {cameras.length}/{maxSlots} CAMERAS</span>
+        <span>SURVEILLANCE GRID — {cameras.length}/{maxSlots} CAMERAS</span>
       </div>
       <div className="camera-grid">
         {cameras.map((cam) => (

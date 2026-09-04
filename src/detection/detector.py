@@ -30,6 +30,7 @@ class YOLODetector:
         self.device = resolve_yolo_device(device)
         self.model = None
         self._load_model()
+        self._warmup()
 
     def _load_model(self) -> None:
         """Loads the Ultralytics YOLO model with clear error handling."""
@@ -54,6 +55,24 @@ class YOLODetector:
             raise RuntimeError(
                 f"Unable to initialize YOLODetector with model '{self.model_name}': {e}"
             ) from e
+
+    def _warmup(self) -> None:
+        """Runs one throwaway inference during model load rather than on the
+        first real frame. A CUDA model's first predict() call pays a
+        one-time kernel-compilation/cuDNN-algo-search cost (observed here as
+        several seconds) — without this, that cost lands on whichever frame
+        the decoupled AI worker happens to pick up first (see
+        src/pipeline/camera_manager.py), which can be well past the start of
+        a short demo clip purely due to timing. Paying it here instead keeps
+        that one-time cost inside the camera's STARTING phase, where it's
+        expected, rather than as a silent gap right after going ONLINE."""
+        if self.model is None:
+            return
+        try:
+            dummy = np.zeros((480, 640, 3), dtype=np.uint8)
+            self.model.predict(source=dummy, conf=self.confidence_threshold, device=self.device, verbose=False)
+        except Exception:
+            pass  # warmup is a best-effort optimization, never fatal to startup
 
     def detect(
         self,

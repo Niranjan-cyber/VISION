@@ -9,7 +9,8 @@ of its own — it only:
      CameraSession objects (each one PipelineSession in its own thread).
   2. Publishes per-camera and aggregate state as JSON, and per-camera
      annotated frames as MJPEG.
-  3. Accepts new video uploads and turns them into new camera sessions.
+  3. Accepts new video uploads or live local camera devices and turns them
+     into new camera sessions.
 
 No Redis/Kafka/database — CameraManager's in-memory dict of CameraSession
 objects is the entire "multi-camera infrastructure" this MVP needs.
@@ -19,6 +20,7 @@ import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
+from typing import Optional
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -26,7 +28,8 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from src.pipeline.camera_manager import CameraLimitReached, CameraManager, MAX_ACTIVE_CAMERAS
+from src.ingestion.video import discover_camera_devices
+from src.pipeline.camera_manager import AI_FPS_DEFAULT, CameraLimitReached, CameraManager, MAX_ACTIVE_CAMERAS
 from src.pipeline.serialize import (
     serialize_camera_summary,
     serialize_events,
@@ -78,6 +81,11 @@ ENABLE_ANPR = os.environ.get("VISION_ENABLE_ANPR", "false").strip().lower() == "
 # else CPU. 'cuda' forces the attempt (still falls back to CPU with a warning if
 # unavailable — see src/core/device.py). 'cpu' forces CPU regardless of hardware.
 DEVICE = os.environ.get("VISION_DEVICE", "auto").strip().lower()
+# Rate the AI worker (detection/tracking/face/ANPR/events) runs at, decoupled
+# from video capture/display FPS — see src/pipeline/camera_manager.py.
+AI_FPS = float(os.environ.get("VISION_AI_FPS", str(AI_FPS_DEFAULT)))
+# How many local device indices GET /cameras/devices probes for a live camera.
+CAMERA_DEVICE_PROBE_RANGE = int(os.environ.get("VISION_CAMERA_DEVICE_PROBE_RANGE", "5"))
 
 UPLOAD_DIR = "data/uploads"
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv"}
@@ -91,7 +99,7 @@ async def lifespan(app: FastAPI):
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     for cfg in DEFAULT_CAMERAS[:CAMERA_COUNT]:
         try:
-            camera_manager.add_camera(enable_anpr=ENABLE_ANPR, device=DEVICE, **cfg)
+            camera_manager.add_camera(enable_anpr=ENABLE_ANPR, device=DEVICE, ai_fps=AI_FPS, **cfg)
         except CameraLimitReached:
             break
     yield
@@ -146,8 +154,52 @@ def list_cameras():
     return [serialize_camera_summary(cam) for cam in camera_manager.list_cameras()]
 
 
+@app.get("/cameras/devices")
+def list_camera_devices():
+    """Probes local camera device indices by actually attempting to open
+    (and read a frame from) each one — never invents a device that can't
+    actually be opened. A device already claimed by an active live
+    CameraSession will correctly report unavailable (it's in use)."""
+    return discover_camera_devices(max_index=CAMERA_DEVICE_PROBE_RANGE)
+
+
 @app.post("/cameras")
-def add_camera(camera_name: str = Form(...), video: UploadFile = File(...)):
+def add_camera(
+    camera_name: str = Form(...),
+    source_type: str = Form("video"),
+    video: Optional[UploadFile] = File(None),
+    device_index: Optional[int] = Form(None),
+):
+    source_type = source_type.strip().lower()
+    if source_type not in ("video", "live"):
+        raise HTTPException(status_code=400, detail="source_type must be 'video' or 'live'")
+
+    name = camera_name.strip() or "Untitled Camera"
+
+    if source_type == "live":
+        if device_index is None:
+            raise HTTPException(status_code=400, detail="device_index is required for source_type='live'")
+        try:
+            cam = camera_manager.add_camera(
+                camera_name=name,
+                source_type="live",
+                device_index=device_index,
+                zones_path=None,  # no auto-calibrated zone for a newly connected camera
+                enable_anpr=ENABLE_ANPR,
+                device=DEVICE,
+                ai_fps=AI_FPS,
+            )
+        except CameraLimitReached as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return serialize_camera_summary(cam)
+
+    # source_type == "video": retain the existing upload implementation —
+    # extension validation, a safe generated filename, MAX_ACTIVE_CAMERAS.
+    if video is None:
+        raise HTTPException(status_code=400, detail="video file is required for source_type='video'")
+
     ext = os.path.splitext(video.filename or "")[1].lower()
     if ext not in ALLOWED_VIDEO_EXTENSIONS:
         raise HTTPException(
@@ -164,11 +216,13 @@ def add_camera(camera_name: str = Form(...), video: UploadFile = File(...)):
 
     try:
         cam = camera_manager.add_camera(
-            camera_name=camera_name.strip() or "Untitled Camera",
+            camera_name=name,
+            source_type="video",
             video_path=stored_path,
             zones_path=None,  # no auto-calibrated zone for an arbitrary upload
             enable_anpr=ENABLE_ANPR,
             device=DEVICE,
+            ai_fps=AI_FPS,
         )
     except CameraLimitReached as e:
         os.remove(stored_path)

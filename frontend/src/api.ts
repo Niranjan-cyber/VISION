@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type {
   AlertItem,
   CameraDetectionState,
+  CameraDevice,
   CameraSummary,
   GlobalDetections,
   GlobalStatus,
@@ -90,16 +91,33 @@ export async function removeCamera(cameraId: string): Promise<void> {
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail ?? "remove failed");
 }
 
-export async function addCamera(cameraName: string, file: File): Promise<CameraSummary> {
+export async function addVideoCamera(cameraName: string, file: File): Promise<CameraSummary> {
   const form = new FormData();
   form.append("camera_name", cameraName);
+  form.append("source_type", "video");
   form.append("video", file);
+  return submitAddCamera(form);
+}
+
+export async function addLiveCamera(cameraName: string, deviceIndex: number): Promise<CameraSummary> {
+  const form = new FormData();
+  form.append("camera_name", cameraName);
+  form.append("source_type", "live");
+  form.append("device_index", String(deviceIndex));
+  return submitAddCamera(form);
+}
+
+async function submitAddCamera(form: FormData): Promise<CameraSummary> {
   const res = await fetch(`${API_BASE}/cameras`, { method: "POST", body: form });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(body.detail ?? "failed to add camera");
   }
   return body as CameraSummary;
+}
+
+export async function listCameraDevices(): Promise<CameraDevice[]> {
+  return getJSON<CameraDevice[]>("/cameras/devices");
 }
 
 /** Pulls one camera's slice out of the already-polled global detections

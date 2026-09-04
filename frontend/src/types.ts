@@ -5,6 +5,7 @@
 // camera_id/camera_name; global endpoints aggregate across active cameras.
 
 export type CameraStatus = "starting" | "online" | "stopped" | "error";
+export type SourceType = "video" | "live";
 
 export interface Person {
   track_id: number;
@@ -51,6 +52,8 @@ export interface CameraDetectionState {
   camera_id: string;
   camera_name: string;
   camera_status: CameraStatus;
+  source_type: SourceType;
+  has_zone: boolean;
   timestamp: number;
   frame_id: number;
   persons: Person[];
@@ -95,10 +98,21 @@ export interface GlobalStatus {
 export interface CameraSummary {
   camera_id: string;
   camera_name: string;
+  source_type: SourceType;
   video_source: string;
+  device_index: number | null;
   zones_path: string | null;
+  has_zone: boolean;
   status: CameraStatus;
   error: string | null;
   anpr_enabled: boolean;
   statistics: Statistics;
+}
+
+/** One entry of GET /cameras/devices — a probed local camera device index. */
+export interface CameraDevice {
+  device_index: number;
+  available: boolean;
+  width: number;
+  height: number;
 }
