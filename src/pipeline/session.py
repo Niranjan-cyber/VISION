@@ -52,7 +52,7 @@ from src.face.alignment import align_face
 from src.face.association import FaceTrackAssociation, associate_faces_to_tracks
 from src.face.detector import FaceDetector
 from src.face.embedder import ONNXRuntimeArcFaceEmbedder, OpenCVArcFaceEmbedder
-from src.face.gallery import load_gallery_from_dir
+from src.face.gallery import load_gallery_from_dir_cached
 from src.face.matcher import FaceMatcher
 from src.face.modern_embedder import W600KR50Embedder
 from src.ingestion.video import VideoSource
@@ -219,12 +219,12 @@ class PipelineSession:
                 self._log(f"[INFO] Connecting to database: {db_uri}")
             else:
                 self._log("[INFO] Persistence: in-memory (no db_uri supplied)")
-            self.gallery = load_gallery_from_dir(gallery_dir, self.face_detector, self.face_embedder, db_uri=db_uri)
+            self.gallery = load_gallery_from_dir_cached(gallery_dir, self.face_detector, self.face_embedder, db_uri=db_uri)
             self.face_matcher = FaceMatcher(self.gallery, threshold=face_threshold, margin=face_margin)
         except Exception as e:
             self._log(f"[WARNING] Gallery database initialization failed ({e}). Falling back to in-memory mode.")
             try:
-                self.gallery = load_gallery_from_dir(gallery_dir, self.face_detector, self.face_embedder, db_uri=None)
+                self.gallery = load_gallery_from_dir_cached(gallery_dir, self.face_detector, self.face_embedder, db_uri=None)
                 self.face_matcher = FaceMatcher(self.gallery, threshold=face_threshold, margin=face_margin)
             except Exception as fallback_err:
                 self.source.release()

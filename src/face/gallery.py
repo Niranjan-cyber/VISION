@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 from typing import Dict, List, Set, Union, Optional
 import cv2
 import numpy as np
@@ -240,3 +241,41 @@ def load_gallery_from_dir(
     print(f"[INFO] Total Embeddings: {len(gallery)}", file=sys.stderr)
 
     return gallery
+
+
+_gallery_cache: Dict[str, FaceGallery] = {}
+_gallery_cache_lock = threading.Lock()
+
+
+def load_gallery_from_dir_cached(
+    gallery_dir: str,
+    face_detector,
+    face_embedder,
+    db_uri: Optional[str] = None,
+) -> FaceGallery:
+    """
+    Process-wide cache around load_gallery_from_dir(), keyed by
+    (gallery_dir, db_uri). Every camera needs its own face_detector/
+    face_embedder for live per-frame processing, but the *reference*
+    embeddings gallery loading produces are the same deterministic output
+    no matter which detector/embedder instance computed them — so with N
+    cameras sharing one gallery directory (the normal multi-camera setup),
+    only the first caller actually does the detect+align+embed work for
+    every gallery image; the rest get the already-built FaceGallery
+    instantly instead of repeating it. A FaceGallery is never mutated after
+    construction (see FaceGallery.add(), only called during loading), so
+    sharing one instance read-only across camera threads is safe.
+    """
+    cache_key = f"{os.path.abspath(gallery_dir)}::{db_uri or ''}"
+    with _gallery_cache_lock:
+        cached = _gallery_cache.get(cache_key)
+        if cached is not None:
+            print(
+                f"[INFO] Reusing already-loaded face gallery for '{gallery_dir}' "
+                f"({len(cached)} embeddings, {len(cached.identities())} identities).",
+                file=sys.stderr,
+            )
+            return cached
+        gallery = load_gallery_from_dir(gallery_dir, face_detector, face_embedder, db_uri)
+        _gallery_cache[cache_key] = gallery
+        return gallery
